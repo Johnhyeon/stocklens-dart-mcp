@@ -1,0 +1,1060 @@
+"""DART MCP Server — FastMCP 인스턴스 + 도구 선언."""
+
+from __future__ import annotations
+
+from mcp.server.fastmcp import FastMCP
+
+from dart_mcp_server._cache import cached
+from dart_mcp_server._corp_code import (
+    CorpEntry,
+    resolve_identifier,
+    search_by_name,
+)
+from dart_mcp_server._http import get_bytes, get_json
+from dart_mcp_server._metrics import track_metrics
+from dart_mcp_server._safe import DartApiError, safe_tool
+from dart_mcp_server._validate import (
+    days_to_range,
+    normalize_bsns_year,
+    normalize_corp_code,
+    normalize_fs_div,
+    normalize_rcept_no,
+    normalize_reprt_code,
+    normalize_sj_div,
+    normalize_yyyymmdd,
+    reprt_code_label,
+)
+
+mcp = FastMCP(
+    "DART",
+    instructions="""DART MCP — 금융감독원 전자공시(OpenDART API) 래퍼.
+
+## 정체성
+
+이 서버는 **공시·재무제표 정형 데이터**만 다룹니다. 시세·차트·수급은 자매 서버
+`stocklens-mcp`(네이버 증권)가 담당합니다. 두 서버는 서로 호출하지 않으며
+Claude가 조정자입니다.
+
+## 식별자 규칙
+
+- **stock_code**: 한국거래소 6자리 종목코드 (예: 005930)
+- **corp_code**: DART 8자리 고유번호 (예: 00126380) — 모든 DART API의 키
+
+종목명·종목코드만 알 때 먼저 `search_company`를 호출해 corp_code를 확정하세요.
+다른 도구는 corp_code를 입력으로 받습니다.
+
+## 도구
+
+- `search_company`: 종목명/코드 → corp_code + 기업개황
+- `list_disclosures`: 기간/유형별 공시 목록 (rcept_no는 후속 도구의 키)
+- `get_disclosure_detail`: rcept_no → 공시 본문 발췌 + DART viewer URL + 첨부 목록
+- `get_major_accounts`: 정기보고서의 핵심 재무 (매출/영업이익/순이익/자산/부채/자본 등) — 당기·전기·전전기 비교
+- `get_full_financial`: 전체 재무제표. sj_div(BS/IS/CIS/CF/SCE) 필수 — 토큰 폭발 방지
+- `get_major_holders`: 5%룰 대량보유 변동 — 외국인/펀드/행동주의 진입 추적 (시세에 안 나오는 자본 흐름)
+- `get_insider_trades`: 임원·주요주주 특정증권 소유 — 내부자 매매 시그널
+
+## 워크플로우 권장
+
+  1. `search_company("삼성전자")` → corp_code 확보
+  2. `list_disclosures(corp_code="00126380", days=30)` → 공시 목록 + rcept_no
+  3. `get_disclosure_detail(rcept_no="...")` → 본문 발췌 (필요 시)
+
+또는 재무 흐름:
+  1. `search_company` → corp_code
+  2. `get_major_accounts(corp_code, bsns_year=2024, reprt_code="annual")` → 빠른 핵심 수치
+  3. `get_full_financial(corp_code, bsns_year, reprt_code, fs_div="CFS", sj_div="IS")` → 전체 손익
+
+## 식별자 가이드 (중요)
+
+한국 주식 식별자는 두 가지 — 절대 헷갈리지 마세요:
+
+| 길이 | 형식 | 의미 | 출처 시스템 |
+|---|---|---|---|
+| 6자리 | 영숫자 (예: `005930`, `0088M0`) | 한국거래소 종목코드 | KRX, 네이버 등 시세 시스템 |
+| 8자리 | 숫자만 (예: `00126380`) | DART 고유번호 (corp_code) | 금융감독원 DART |
+
+**디스패치 룰**:
+- 사용자가 **8자리 숫자**만 주고 의미를 안 밝히면 → corp_code 가정. `search_company`를 먼저 호출하세요. 결과에 6자리 `stock_code`도 같이 나오니 시세 도구(stocklens 등)에 위임 가능.
+- 사용자가 6자리 코드로 DART 정보(공시/재무)를 묻거나, 종목명만 주면 → `search_company`로 corp_code 변환 후 다른 DART 도구 호출.
+- 다른 MCP(stocklens 등)가 6자리 코드만 알고 corp_code를 모를 때 → 사용자에게 종목명을 물어 `search_company`로 풀면 됩니다.
+
+`search_company`는 **식별자 변환의 디스패치 허브** 역할도 합니다. 8자리/6자리/이름 무엇이든 받아서 corp_code + stock_code 둘 다 반환.
+
+## 기타 식별자
+
+- reprt_code: "annual"(사업), "Q1"(1분기), "H1"(반기), "Q3"(3분기) — 한글 라벨도 인식.
+- fs_div: "CFS"(연결재무제표 — 기본), "OFS"(별도재무제표).
+- sj_div: "BS"(재무상태표), "IS"(손익계산서), "CIS"(포괄손익), "CF"(현금흐름표), "SCE"(자본변동표).
+""",
+)
+
+
+# ---------------------------------------------------------------------------
+# 내부 헬퍼
+# ---------------------------------------------------------------------------
+
+@cached(ttl_seconds=24 * 3600)
+async def _fetch_company(corp_code: str) -> dict:
+    """DART company.json — 기업개황. 24시간 캐시."""
+    return await get_json("/company.json", params={"corp_code": corp_code})
+
+
+_CORP_CLS_LABEL = {
+    "Y": "유가증권",
+    "K": "코스닥",
+    "N": "코넥스",
+    "E": "기타",
+}
+
+
+def _format_company(entry: CorpEntry, profile: dict) -> str:
+    cls_code = (profile.get("corp_cls") or "").strip()
+    cls_label = _CORP_CLS_LABEL.get(cls_code, cls_code or "-")
+
+    lines = [
+        f"# {profile.get('corp_name') or entry.corp_name}",
+        "",
+        f"- corp_code: `{entry.corp_code}` (DART 고유번호)",
+        f"- 종목코드: {entry.stock_code or '비상장'}",
+        f"- 시장구분: {cls_label}",
+        f"- 영문명: {profile.get('corp_name_eng') or entry.corp_eng_name or '-'}",
+        f"- 대표자: {profile.get('ceo_nm') or '-'}",
+        f"- 설립일: {profile.get('est_dt') or '-'}",
+        f"- 결산월: {profile.get('acc_mt') or '-'}",
+        f"- 사업자번호: {profile.get('bizr_no') or '-'}",
+        f"- 법인등록번호: {profile.get('jurir_no') or '-'}",
+        f"- 업종코드: {profile.get('induty_code') or '-'}",
+        f"- 주소: {profile.get('adres') or '-'}",
+        f"- 홈페이지: {profile.get('hm_url') or '-'}",
+        f"- IR페이지: {profile.get('ir_url') or '-'}",
+        f"- 전화: {profile.get('phn_no') or '-'} / 팩스: {profile.get('fax_no') or '-'}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_candidates(entries: list[CorpEntry], query: str) -> str:
+    lines = [
+        f"'{query}' 검색 결과 ({len(entries)}건). 정확한 회사를 골라 다시 호출하세요.",
+        "",
+    ]
+    for e in entries:
+        market = ""
+        if e.stock_code:
+            market = f" [{e.stock_code}]"
+        lines.append(f"- {e.corp_name}{market} → corp_code: `{e.corp_code}`")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@safe_tool
+@track_metrics("search_company")
+async def search_company(query: str, listed_only: bool = True) -> str:
+    """기업검색 / 식별자 변환 디스패치 — 종목명·6자리 종목코드·8자리 corp_code 무엇이든
+    받아서 corp_code + stock_code + 기업개황을 반환.
+
+    DART의 모든 후속 API는 8자리 corp_code를 입력으로 받습니다. 그래서 이 도구는
+    워크플로우의 **첫 번째 디스패치**로 자주 쓰입니다.
+
+    ## 언제 이 도구를 부르나
+
+    1. **사용자가 8자리 숫자 식별자를 줬는데 시스템 출처가 모호할 때** — 한국 주식
+       종목코드는 6자리이므로 8자리 숫자는 corp_code일 가능성이 높습니다. 다른 MCP
+       (예: stocklens)가 6자리만 받아서 처리 못 할 때, 이 도구로 corp_code를 풀면
+       응답에 stock_code(6자리)가 같이 나와 다른 MCP에 위임할 수 있습니다.
+    2. 종목명("삼성전자")만 받고 후속 DART 도구를 호출해야 할 때.
+    3. 6자리 종목코드를 받고 corp_code가 필요할 때 (DART 도구 호출 전).
+    4. 회사 기본정보(대표자, 시장구분, 주소, 사업자번호 등)가 필요할 때.
+
+    ## 입력 자동 판정
+
+    - 8자리 숫자 → corp_code lookup
+    - 6자리 영숫자 → stock_code lookup
+    - 그 외 → 종목명 검색 (정확/부분 일치)
+
+    Args:
+        query: 종목명, 6자리 종목코드, 또는 8자리 corp_code.
+        listed_only: True면 상장사만 (기본). 비상장 자회사도 포함하려면 False.
+
+    Returns:
+        - 단일 매칭: corp_code + stock_code + 기업개황(대표자/설립일/시장구분/주소 등).
+        - 다중 매칭: 후보 리스트 (사용자에게 확인 요청).
+        - 매칭 없음: 안내 메시지.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "⚠️ 검색어가 비어있습니다."
+
+    # 1) 정확한 코드 매칭 시도
+    entry = await resolve_identifier(q)
+    if entry is not None:
+        profile = await _fetch_company(entry.corp_code)
+        return _format_company(entry, profile)
+
+    # 2) 이름 검색
+    candidates = await search_by_name(q, listed_only=listed_only, limit=20)
+    if not candidates:
+        # listed_only=True 였고 결과 없으면 비상장도 한 번 더 시도
+        if listed_only:
+            fallback = await search_by_name(q, listed_only=False, limit=10)
+            if fallback:
+                lines = [
+                    f"'{q}' 상장사에서는 결과가 없습니다.",
+                    f"비상장 포함 후보 {len(fallback)}건:",
+                    "",
+                ]
+                for e in fallback:
+                    tag = "비상장" if not e.is_listed else e.stock_code
+                    lines.append(f"- {e.corp_name} [{tag}] → corp_code: `{e.corp_code}`")
+                return "\n".join(lines)
+        return f"'{q}'에 해당하는 회사를 찾을 수 없습니다. 정확한 종목명/코드를 확인해주세요."
+
+    if len(candidates) == 1:
+        entry = candidates[0]
+        profile = await _fetch_company(entry.corp_code)
+        return _format_company(entry, profile)
+
+    return _format_candidates(candidates, q)
+
+
+# ---------------------------------------------------------------------------
+# list_disclosures
+# ---------------------------------------------------------------------------
+
+# 공시유형 친근 라벨 → DART pblntf_ty 코드
+# https://opendart.fss.or.kr 가이드 참조 (정기/주요사항/발행/지분/외부감사/거래소 등)
+_KIND_TO_PBLNTF_TY: dict[str, str] = {
+    "all": "",
+    "regular": "A", "정기": "A",          # 사업/반기/분기보고서
+    "material": "B", "주요사항": "B",      # 주요사항보고서 (감자, M&A 등)
+    "issuance": "C", "발행": "C",          # 증권신고
+    "ownership": "D", "지분": "D",         # 대량보유, 임원·주요주주
+    "etc": "E", "기타": "E",
+    "audit": "F", "외부감사": "F", "감사": "F",
+    "fund": "G", "펀드": "G",
+    "abs": "H", "자산유동화": "H",
+    "exchange": "I", "거래소": "I",
+    "fair": "J", "공정위": "J",
+}
+
+
+def _resolve_kind(kind: str) -> str:
+    k = (kind or "all").strip().lower()
+    # 한글은 lower 영향 없음
+    if k in _KIND_TO_PBLNTF_TY:
+        return _KIND_TO_PBLNTF_TY[k]
+    # 사용자가 raw DART 코드(A~J)를 직접 줬을 수도
+    if len(k) == 1 and k.upper() in {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J"}:
+        return k.upper()
+    raise ValueError(
+        f"알 수 없는 공시유형 '{kind}'. "
+        f"사용 가능: all, regular, material, issuance, ownership, audit, exchange (또는 한글 라벨)."
+    )
+
+
+@cached(ttl_seconds=5 * 60)
+async def _fetch_disclosure_list(
+    corp_code: str | None,
+    bgn_de: str,
+    end_de: str,
+    pblntf_ty: str,
+    page_count: int,
+) -> dict:
+    params: dict = {
+        "bgn_de": bgn_de,
+        "end_de": end_de,
+        "page_no": 1,
+        "page_count": page_count,
+        "sort": "date",
+        "sort_mth": "desc",
+    }
+    if corp_code:
+        params["corp_code"] = corp_code
+    if pblntf_ty:
+        params["pblntf_ty"] = pblntf_ty
+    try:
+        return await get_json("/list.json", params=params)
+    except DartApiError as e:
+        # status 013 = "조회된 데이터가 없습니다" — 에러가 아니라 빈 결과로 취급
+        if e.status == "013":
+            return {"status": "013", "message": e.message, "list": [], "total_count": 0}
+        raise
+
+
+def _format_disclosures(
+    data: dict,
+    *,
+    corp_code: str | None,
+    bgn_de: str,
+    end_de: str,
+    kind: str,
+) -> str:
+    items = data.get("list") or []
+    total = data.get("total_count") or len(items)
+    bgn_fmt = f"{bgn_de[:4]}-{bgn_de[4:6]}-{bgn_de[6:]}"
+    end_fmt = f"{end_de[:4]}-{end_de[4:6]}-{end_de[6:]}"
+
+    scope = f"corp_code={corp_code}" if corp_code else "전체회사"
+    kind_label = kind if kind != "all" else "전체유형"
+    header = f"# 공시 목록 ({scope}, {bgn_fmt} ~ {end_fmt}, {kind_label}, {total}건)"
+
+    if not items:
+        return header + "\n\n해당 기간/조건에 공시가 없습니다."
+
+    lines = [header, "", "| 접수일 | 회사 | 보고서명 | rcept_no | 비고 |", "|---|---|---|---|---|"]
+    for r in items:
+        rcept_dt = r.get("rcept_dt") or ""
+        date_fmt = f"{rcept_dt[:4]}-{rcept_dt[4:6]}-{rcept_dt[6:]}" if len(rcept_dt) == 8 else rcept_dt
+        corp = r.get("corp_name") or ""
+        report = (r.get("report_nm") or "").replace("|", "·")
+        rcept_no = r.get("rcept_no") or ""
+        rm = (r.get("rm") or "").strip() or "-"
+        lines.append(f"| {date_fmt} | {corp} | {report} | `{rcept_no}` | {rm} |")
+
+    if len(items) < total:
+        lines.append("")
+        lines.append(f"_표시 {len(items)}건 / 전체 {total}건. 더 많은 결과는 days·limit 조정._")
+    lines.append("")
+    lines.append("_rcept_no는 향후 get_disclosure_detail 도구의 입력값으로 사용됩니다._")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("list_disclosures")
+async def list_disclosures(
+    corp_code: str | None = None,
+    days: int = 30,
+    kind: str = "all",
+    limit: int = 20,
+    bgn_de: str | None = None,
+    end_de: str | None = None,
+) -> str:
+    """공시목록 — DART에 접수된 공시 리스트를 기간·유형으로 필터링.
+
+    특정 회사 공시를 보려면 corp_code(8자리) 필수. 종목명/종목코드만 안다면 먼저
+    `search_company`로 corp_code를 확정하세요. corp_code를 생략하면 전체 회사 공시.
+
+    Args:
+        corp_code: DART 8자리 고유번호 (선택). 생략 시 전체회사 공시.
+        days: 오늘 기준 최근 N일 (기본 30, 최대 3650). bgn_de/end_de를 주면 무시.
+        kind: 공시유형 필터.
+            "all"(전체) / "regular"(정기-사업/반기/분기) / "material"(주요사항) /
+            "issuance"(발행) / "ownership"(지분) / "audit"(외부감사) / "exchange"(거래소)
+            한글 라벨("정기", "지분") 또는 DART 원시 코드(A~J)도 가능.
+        limit: 반환 건수 (기본 20, 최대 100). DART 페이지 사이즈에 매핑.
+        bgn_de: 시작일 YYYYMMDD (선택, days보다 우선).
+        end_de: 종료일 YYYYMMDD (선택, days보다 우선).
+
+    Returns:
+        마크다운 표 — 접수일/회사/보고서명/rcept_no/비고. rcept_no는 후속 도구 입력값.
+    """
+    cc = normalize_corp_code(corp_code) if corp_code is not None else None
+    pblntf_ty = _resolve_kind(kind)
+
+    if not isinstance(limit, int) or limit < 1 or limit > 100:
+        raise ValueError(f"limit은 1~100 사이의 정수여야 합니다 (받음: {limit}).")
+
+    if bgn_de or end_de:
+        bgn = normalize_yyyymmdd(bgn_de, field="bgn_de")
+        end = normalize_yyyymmdd(end_de, field="end_de")
+        if bgn > end:
+            raise ValueError(f"bgn_de({bgn})가 end_de({end})보다 늦습니다.")
+    else:
+        bgn, end = days_to_range(days)
+
+    data = await _fetch_disclosure_list(cc, bgn, end, pblntf_ty, limit)
+    return _format_disclosures(data, corp_code=cc, bgn_de=bgn, end_de=end, kind=kind)
+
+
+# ---------------------------------------------------------------------------
+# get_major_accounts (fnlttSinglAcnt.json)
+# ---------------------------------------------------------------------------
+
+# 주요계정 응답에 자주 등장하는 계정명 정렬 키 — 의미 있는 순서로 보여주기 위함
+_ACCOUNT_ORDER = {
+    # IS / CIS
+    "매출액": 1, "영업수익": 1,
+    "매출원가": 2,
+    "매출총이익": 3,
+    "판매비와관리비": 4,
+    "영업이익": 5, "영업이익(손실)": 5,
+    "영업외수익": 6,
+    "영업외비용": 7,
+    "법인세비용차감전순이익": 8, "법인세비용차감전순이익(손실)": 8,
+    "법인세비용": 9,
+    "당기순이익": 10, "당기순이익(손실)": 10,
+    # BS
+    "자산총계": 100,
+    "유동자산": 101,
+    "비유동자산": 102,
+    "부채총계": 110,
+    "유동부채": 111,
+    "비유동부채": 112,
+    "자본총계": 120,
+    "자본금": 121,
+    "이익잉여금": 122,
+}
+
+
+@cached(ttl_seconds=24 * 3600)
+async def _fetch_major_accounts(corp_code: str, bsns_year: str, reprt_code: str) -> dict:
+    try:
+        return await get_json(
+            "/fnlttSinglAcnt.json",
+            params={
+                "corp_code": corp_code,
+                "bsns_year": bsns_year,
+                "reprt_code": reprt_code,
+            },
+        )
+    except DartApiError as e:
+        if e.status == "013":
+            return {"status": "013", "message": e.message, "list": []}
+        raise
+
+
+def _fmt_amount(value) -> str:
+    """천단위 콤마. 음수/빈값 안전 처리."""
+    if value is None:
+        return "-"
+    s = str(value).strip()
+    if not s or s == "-":
+        return "-"
+    # DART는 음수를 '-숫자' 또는 괄호로 줄 수 있음
+    sign = ""
+    if s.startswith("-"):
+        sign = "-"
+        s = s[1:]
+    if s.startswith("(") and s.endswith(")"):
+        sign = "-"
+        s = s[1:-1]
+    digits = s.replace(",", "")
+    if digits.replace(".", "").isdigit():
+        try:
+            if "." in digits:
+                return sign + f"{float(digits):,.2f}"
+            return sign + f"{int(digits):,}"
+        except ValueError:
+            pass
+    return (sign + s)
+
+
+def _dedup_account_rows(items: list[dict]) -> list[dict]:
+    """DART fnlttSinglAcnt가 동일 항목을 두 번 내려보내는 노이즈 제거.
+
+    예: 삼성전자 사업보고서에서 '당기순이익(손실)'이 IS 안에 ord=29와 ord=61로 두 번 박힘.
+    fs_div, sj_div, account_nm, 모든 amount가 100% 같음 (ord만 다름).
+
+    안전을 위해 6중 키가 정확히 일치할 때만 dedup. amount 한 글자라도 다르면 보존
+    (지배/비지배 구분 같은 의미 있는 행일 수 있음). 낮은 ord 우선 보존.
+    """
+    seen: dict[tuple, tuple[int, dict]] = {}
+    for r in items:
+        key = (
+            (r.get("fs_div") or "").strip(),
+            (r.get("sj_div") or "").strip(),
+            (r.get("account_nm") or "").strip(),
+            (r.get("thstrm_amount") or "").strip(),
+            (r.get("frmtrm_amount") or "").strip(),
+            (r.get("bfefrmtrm_amount") or "").strip(),
+        )
+        try:
+            ord_val = int(r.get("ord", "999") or 999)
+        except (TypeError, ValueError):
+            ord_val = 999
+        existing = seen.get(key)
+        if existing is None or ord_val < existing[0]:
+            seen[key] = (ord_val, r)
+    return [v[1] for v in seen.values()]
+
+
+def _format_major_accounts(
+    data: dict,
+    *,
+    corp_code: str,
+    bsns_year: str,
+    reprt_code: str,
+) -> str:
+    items = _dedup_account_rows(data.get("list") or [])
+    title = f"# 주요계정 (corp_code={corp_code}, {bsns_year} {reprt_code_label(reprt_code)})"
+    if not items:
+        return title + "\n\n해당 연도/보고서의 주요계정 데이터가 없습니다."
+
+    # fs_div(CFS/OFS) → sj_nm(재무제표명) → rows
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    nm_periods: dict[str, str] = {"thstrm": "", "frmtrm": "", "bfefrmtrm": ""}
+    for r in items:
+        fs = r.get("fs_div") or ""
+        sj = r.get("sj_nm") or "(미분류)"
+        grouped.setdefault(fs, {}).setdefault(sj, []).append(r)
+        # 기간 라벨 (마지막으로 본 값으로)
+        for k in nm_periods:
+            v = r.get(f"{k}_nm")
+            if v:
+                nm_periods[k] = v
+
+    fs_label = {"CFS": "연결재무제표", "OFS": "별도재무제표"}
+    lines = [title]
+
+    # CFS를 먼저 보여주기 (대부분의 분석 표준)
+    fs_order = sorted(grouped.keys(), key=lambda x: 0 if x == "CFS" else 1)
+
+    has_bfe = any(
+        (r.get("bfefrmtrm_amount") or "").strip() not in ("", "-")
+        for r in items
+    )
+    cur_label = nm_periods["thstrm"] or "당기"
+    prev_label = nm_periods["frmtrm"] or "전기"
+    bfe_label = nm_periods["bfefrmtrm"] or "전전기"
+
+    for fs in fs_order:
+        lines.append("")
+        lines.append(f"## {fs_label.get(fs, fs)}")
+        for sj, rows in grouped[fs].items():
+            rows_sorted = sorted(
+                rows,
+                key=lambda r: (
+                    _ACCOUNT_ORDER.get(r.get("account_nm", "").strip(), 999),
+                    int(r.get("ord", "999") or 999),
+                ),
+            )
+            lines.append("")
+            lines.append(f"### {sj}")
+            if has_bfe:
+                lines.append(f"| 계정 | {cur_label} | {prev_label} | {bfe_label} |")
+                lines.append("|---|---:|---:|---:|")
+            else:
+                lines.append(f"| 계정 | {cur_label} | {prev_label} |")
+                lines.append("|---|---:|---:|")
+            for r in rows_sorted:
+                acc = (r.get("account_nm") or "").strip() or "(이름없음)"
+                cur = _fmt_amount(r.get("thstrm_amount"))
+                prev = _fmt_amount(r.get("frmtrm_amount"))
+                if has_bfe:
+                    bfe = _fmt_amount(r.get("bfefrmtrm_amount"))
+                    lines.append(f"| {acc} | {cur} | {prev} | {bfe} |")
+                else:
+                    lines.append(f"| {acc} | {cur} | {prev} |")
+
+    # 통화 단위 안내
+    currency = (items[0].get("currency") or "KRW").strip()
+    lines.append("")
+    lines.append(f"_통화: {currency}. 금액 단위는 DART 원본 그대로(보통 원). 회사별 표기 차이 가능._")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_major_accounts")
+async def get_major_accounts(
+    corp_code: str,
+    bsns_year: int | str,
+    reprt_code: str = "annual",
+) -> str:
+    """주요계정 — 정기보고서의 핵심 재무 (매출/영업이익/순이익/자산/부채/자본 등).
+
+    "삼성전자 영업이익" 같은 흔한 질문에 가장 빠르게 답하는 도구. 당기/전기/(전전기)
+    까지 비교해서 마크다운 표로 반환합니다. 사업보고서면 3개년 비교, 분기/반기는 2개년.
+
+    Args:
+        corp_code: DART 8자리 고유번호. 모르면 search_company를 먼저.
+        bsns_year: 사업연도 4자리 (예: 2024).
+        reprt_code: "annual"(사업·기본), "Q1", "H1", "Q3" 또는 한글 라벨.
+
+    Returns:
+        연결재무제표(CFS) 우선, 손익→재무상태 순으로 정렬된 마크다운 표.
+    """
+    cc = normalize_corp_code(corp_code)
+    yr = normalize_bsns_year(bsns_year)
+    rc = normalize_reprt_code(reprt_code)
+    data = await _fetch_major_accounts(cc, yr, rc)
+    return _format_major_accounts(data, corp_code=cc, bsns_year=yr, reprt_code=rc)
+
+
+# ---------------------------------------------------------------------------
+# get_full_financial (fnlttSinglAcntAll.json)
+# ---------------------------------------------------------------------------
+
+@cached(ttl_seconds=24 * 3600)
+async def _fetch_full_financial(
+    corp_code: str, bsns_year: str, reprt_code: str, fs_div: str
+) -> dict:
+    try:
+        return await get_json(
+            "/fnlttSinglAcntAll.json",
+            params={
+                "corp_code": corp_code,
+                "bsns_year": bsns_year,
+                "reprt_code": reprt_code,
+                "fs_div": fs_div,
+            },
+        )
+    except DartApiError as e:
+        if e.status == "013":
+            return {"status": "013", "message": e.message, "list": []}
+        raise
+
+
+_SJ_DIV_LABEL = {
+    "BS": "재무상태표",
+    "IS": "손익계산서",
+    "CIS": "포괄손익계산서",
+    "CF": "현금흐름표",
+    "SCE": "자본변동표",
+}
+
+
+def _format_full_financial(
+    data: dict,
+    *,
+    corp_code: str,
+    bsns_year: str,
+    reprt_code: str,
+    fs_div: str,
+    sj_div: str | None,
+) -> str:
+    items = data.get("list") or []
+    fs_label = {"CFS": "연결", "OFS": "별도"}.get(fs_div, fs_div)
+    title = (
+        f"# 전체 재무제표 (corp_code={corp_code}, {bsns_year} "
+        f"{reprt_code_label(reprt_code)} · {fs_label})"
+    )
+    if not items:
+        return title + "\n\n해당 연도/보고서/구분의 데이터가 없습니다."
+
+    if sj_div:
+        items = [r for r in items if (r.get("sj_div") or "").strip() == sj_div]
+        if not items:
+            avail = sorted({r.get("sj_div") for r in (data.get("list") or []) if r.get("sj_div")})
+            return (
+                title
+                + f"\n\nsj_div='{sj_div}' 결과 없음. "
+                + f"사용 가능 구분: {', '.join(avail) or '(없음)'}"
+            )
+
+    # sj_div 안 줬을 때: 토큰 폭발 방지 — 각 sj_div의 행 수만 요약
+    if not sj_div:
+        by_sj: dict[str, int] = {}
+        for r in items:
+            by_sj[r.get("sj_div") or "?"] = by_sj.get(r.get("sj_div") or "?", 0) + 1
+        lines = [
+            title,
+            "",
+            f"전체 {len(items)}행. **sj_div를 지정해야 표를 반환합니다 (토큰 절약).**",
+            "",
+            "구분별 행 수:",
+        ]
+        for sj, cnt in sorted(by_sj.items()):
+            label = _SJ_DIV_LABEL.get(sj, sj)
+            lines.append(f"- `{sj}` {label}: {cnt}행")
+        lines.append("")
+        lines.append('재호출 예: `get_full_financial(corp_code, bsns_year, reprt_code, fs_div, sj_div="IS")`')
+        return "\n".join(lines)
+
+    # sj_div 지정 → 표 출력
+    nm_periods: dict[str, str] = {"thstrm": "", "frmtrm": "", "bfefrmtrm": ""}
+    for r in items:
+        for k in nm_periods:
+            v = r.get(f"{k}_nm")
+            if v and not nm_periods[k]:
+                nm_periods[k] = v
+
+    has_bfe = any(
+        (r.get("bfefrmtrm_amount") or "").strip() not in ("", "-")
+        for r in items
+    )
+    cur_label = nm_periods["thstrm"] or "당기"
+    prev_label = nm_periods["frmtrm"] or "전기"
+    bfe_label = nm_periods["bfefrmtrm"] or "전전기"
+
+    items_sorted = sorted(items, key=lambda r: int(r.get("ord", "999") or 999))
+
+    lines = [title, "", f"## {_SJ_DIV_LABEL.get(sj_div, sj_div)} ({len(items_sorted)}행)"]
+    if has_bfe:
+        lines.append(f"| 계정 | {cur_label} | {prev_label} | {bfe_label} |")
+        lines.append("|---|---:|---:|---:|")
+    else:
+        lines.append(f"| 계정 | {cur_label} | {prev_label} |")
+        lines.append("|---|---:|---:|")
+
+    for r in items_sorted:
+        acc = (r.get("account_nm") or "").strip() or "(이름없음)"
+        cur = _fmt_amount(r.get("thstrm_amount"))
+        prev = _fmt_amount(r.get("frmtrm_amount"))
+        if has_bfe:
+            bfe = _fmt_amount(r.get("bfefrmtrm_amount"))
+            lines.append(f"| {acc} | {cur} | {prev} | {bfe} |")
+        else:
+            lines.append(f"| {acc} | {cur} | {prev} |")
+
+    currency = (items[0].get("currency") or "KRW").strip()
+    lines.append("")
+    lines.append(f"_통화: {currency}. 단위는 DART 원본 그대로._")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_full_financial")
+async def get_full_financial(
+    corp_code: str,
+    bsns_year: int | str,
+    reprt_code: str = "annual",
+    fs_div: str = "CFS",
+    sj_div: str | None = None,
+) -> str:
+    """전체 재무제표 — 정기보고서의 모든 계정과목.
+
+    행이 많으므로 (사업보고서 손익만 30~70행, 전체는 200+) **반드시 sj_div로 한 표만 골라
+    호출**하세요. sj_div를 비우면 행 수만 요약하고 표는 안 줍니다 (토큰 절약).
+
+    Args:
+        corp_code: DART 8자리 고유번호.
+        bsns_year: 사업연도 4자리.
+        reprt_code: "annual" / "Q1" / "H1" / "Q3" 또는 한글.
+        fs_div: "CFS"(연결, 기본) 또는 "OFS"(별도).
+        sj_div: "BS"(재무상태표) / "IS"(손익계산서) / "CIS"(포괄손익) / "CF"(현금흐름표) / "SCE"(자본변동표).
+            None이면 표 대신 구분별 행 수만 반환.
+
+    Returns:
+        sj_div 지정 시: 마크다운 표 (당기/전기/(전전기) 비교).
+        sj_div None 시: sj_div별 행 수 요약 + 재호출 예시.
+    """
+    cc = normalize_corp_code(corp_code)
+    yr = normalize_bsns_year(bsns_year)
+    rc = normalize_reprt_code(reprt_code)
+    fs = normalize_fs_div(fs_div)
+    sj = normalize_sj_div(sj_div)
+    data = await _fetch_full_financial(cc, yr, rc, fs)
+    return _format_full_financial(
+        data, corp_code=cc, bsns_year=yr, reprt_code=rc, fs_div=fs, sj_div=sj
+    )
+
+
+# ---------------------------------------------------------------------------
+# get_major_holders (majorstock.json) — 5%룰 대량보유 변동
+# get_insider_trades (elestock.json) — 임원·주요주주 특정증권 소유
+# ---------------------------------------------------------------------------
+
+def _fmt_pct(value) -> str:
+    """소수점 비율 포맷 — '12.34' → '12.34%'."""
+    if value is None:
+        return "-"
+    s = str(value).strip()
+    if not s or s == "-":
+        return "-"
+    return f"{s}%"
+
+
+def _fmt_signed(value) -> str:
+    """증감 컬럼 — 음수는 '-N', 양수는 '+N'."""
+    s = _fmt_amount(value)
+    if s in ("-", "0"):
+        return s
+    if s.startswith("-"):
+        return s
+    # _fmt_amount는 양수에 부호 안 붙임
+    if s.replace(",", "").replace(".", "").isdigit():
+        return "+" + s
+    return s
+
+
+@cached(ttl_seconds=5 * 60)
+async def _fetch_major_holders(corp_code: str) -> dict:
+    try:
+        return await get_json("/majorstock.json", params={"corp_code": corp_code})
+    except DartApiError as e:
+        if e.status == "013":
+            return {"status": "013", "message": e.message, "list": []}
+        raise
+
+
+@cached(ttl_seconds=5 * 60)
+async def _fetch_insider_trades(corp_code: str) -> dict:
+    try:
+        return await get_json("/elestock.json", params={"corp_code": corp_code})
+    except DartApiError as e:
+        if e.status == "013":
+            return {"status": "013", "message": e.message, "list": []}
+        raise
+
+
+def _format_major_holders(data: dict, *, corp_code: str, limit: int) -> str:
+    items = data.get("list") or []
+    title = f"# 대량보유(5%룰) 변동 (corp_code={corp_code}, 최근 {limit}건)"
+    if not items:
+        return title + "\n\n해당 회사의 대량보유 보고서가 없습니다."
+
+    # 최신순 정렬 (rcept_dt + rcept_no desc) 후 limit
+    items_sorted = sorted(
+        items,
+        key=lambda r: (r.get("rcept_dt", ""), r.get("rcept_no", "")),
+        reverse=True,
+    )[:limit]
+
+    lines = [
+        title,
+        "",
+        "| 접수일 | 보고자 | 보고유형 | 보유수 | 보유비율 | 증감수 | 증감비율 | 사유 |",
+        "|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for r in items_sorted:
+        d = r.get("rcept_dt", "")
+        date_fmt = f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
+        lines.append(
+            "| {dt} | {who} | {tp} | {qty} | {rt} | {dq} | {dr} | {rsn} |".format(
+                dt=date_fmt,
+                who=(r.get("repror") or "-").replace("|", "·"),
+                tp=(r.get("report_tp") or "-").replace("|", "·"),
+                qty=_fmt_amount(r.get("stkqy")),
+                rt=_fmt_pct(r.get("stkrt")),
+                dq=_fmt_signed(r.get("stkqy_irds")),
+                dr=_fmt_signed(r.get("stkrt_irds")),
+                rsn=(
+                    (r.get("report_resn") or "-")
+                    .replace("|", "·")
+                    .replace("\r", " ")
+                    .replace("\n", " / ")
+                )[:60],
+            )
+        )
+    if len(items) > limit:
+        lines.append("")
+        lines.append(f"_표시 {limit}건 / 전체 {len(items)}건. limit 조정으로 더 보기 가능._")
+    return "\n".join(lines)
+
+
+def _format_insider_trades(data: dict, *, corp_code: str, limit: int) -> str:
+    items = data.get("list") or []
+    title = f"# 임원·주요주주 특정증권 소유 (corp_code={corp_code}, 최근 {limit}건)"
+    if not items:
+        return title + "\n\n해당 회사의 임원·주요주주 보고서가 없습니다."
+
+    items_sorted = sorted(
+        items,
+        key=lambda r: (r.get("rcept_dt", ""), r.get("rcept_no", "")),
+        reverse=True,
+    )[:limit]
+
+    lines = [
+        title,
+        "",
+        "| 접수일 | 보고자 | 직위(등기/주요주주) | 소유수 | 소유비율 | 증감수 | 증감비율 |",
+        "|---|---|---|---:|---:|---:|---:|",
+    ]
+    for r in items_sorted:
+        d = r.get("rcept_dt", "")
+        date_fmt = f"{d[:4]}-{d[4:6]}-{d[6:]}" if len(d) == 8 else d
+        ofcps = (r.get("isu_exctv_ofcps") or "").strip()
+        rgist = (r.get("isu_exctv_rgist_at") or "").strip()
+        main = (r.get("isu_main_shrholdr") or "").strip()
+        role_parts = [p for p in [ofcps, rgist, main] if p and p != "-"]
+        role = " / ".join(role_parts) or "-"
+        lines.append(
+            "| {dt} | {who} | {role} | {qty} | {rt} | {dq} | {dr} |".format(
+                dt=date_fmt,
+                who=(r.get("repror") or "-").replace("|", "·"),
+                role=role.replace("|", "·"),
+                qty=_fmt_amount(r.get("sp_stock_lmp_cnt")),
+                rt=_fmt_pct(r.get("sp_stock_lmp_rate")),
+                dq=_fmt_signed(r.get("sp_stock_lmp_irds_cnt")),
+                dr=_fmt_signed(r.get("sp_stock_lmp_irds_rate")),
+            )
+        )
+    if len(items) > limit:
+        lines.append("")
+        lines.append(f"_표시 {limit}건 / 전체 {len(items)}건._")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_major_holders")
+async def get_major_holders(corp_code: str, limit: int = 10) -> str:
+    """대량보유(5%룰) — 발행주식 5% 이상 보유자의 신규/변동/변경 보고서 목록.
+
+    자본시장법 제147조에 따라 5% 이상 보유자(또는 1% 이상 변동)는 5영업일 내에
+    DART에 보고해야 합니다. 외국인 펀드, 행동주의 투자자, 모회사 지분 변동 등
+    **시세 데이터에는 안 보이는 자본 흐름**을 추적합니다.
+
+    Args:
+        corp_code: DART 8자리 고유번호. 모르면 search_company로 먼저.
+        limit: 최신순 N건 (기본 10, 최대 50).
+
+    Returns:
+        접수일 / 보고자 / 보유수 / 비율 / 증감 / 사유 마크다운 표.
+    """
+    cc = normalize_corp_code(corp_code)
+    if not isinstance(limit, int) or limit < 1 or limit > 50:
+        raise ValueError(f"limit은 1~50 사이의 정수여야 합니다 (받음: {limit}).")
+    data = await _fetch_major_holders(cc)
+    return _format_major_holders(data, corp_code=cc, limit=limit)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_insider_trades")
+async def get_insider_trades(corp_code: str, limit: int = 10) -> str:
+    """임원·주요주주 특정증권 소유 — 등기임원·주요주주(10% 이상)의 자사주 보유/매매.
+
+    내부자가 자기 회사 주식을 사고팔면 5영업일 내에 보고해야 합니다(자본시장법
+    제173조). **스마트머니 시그널** — CEO/CFO가 자기 회사 주식을 매수하면 펀더멘털에
+    자신 있다는 신호로 자주 해석됩니다.
+
+    Args:
+        corp_code: DART 8자리 고유번호.
+        limit: 최신순 N건 (기본 10, 최대 50).
+
+    Returns:
+        접수일 / 보고자 / 직위 / 소유수 / 비율 / 증감 마크다운 표.
+    """
+    cc = normalize_corp_code(corp_code)
+    if not isinstance(limit, int) or limit < 1 or limit > 50:
+        raise ValueError(f"limit은 1~50 사이의 정수여야 합니다 (받음: {limit}).")
+    data = await _fetch_insider_trades(cc)
+    return _format_insider_trades(data, corp_code=cc, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# get_disclosure_detail (document.xml)
+# ---------------------------------------------------------------------------
+
+import io
+import re
+import zipfile
+
+from lxml import etree
+
+# 본문 텍스트 발췌 길이 — 너무 크면 LLM context 폭발
+_DOC_TEXT_LIMIT = 4000
+
+
+def _viewer_url(rcept_no: str) -> str:
+    """DART 공시뷰어 URL — 사용자가 원문 전체를 보고 싶을 때."""
+    return f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
+
+
+def _extract_text_from_xml(xml_bytes: bytes, *, limit: int) -> tuple[str, bool]:
+    """DART 공시 본문 XML(또는 HTML 임베드)에서 사람이 읽을 텍스트만 추출.
+
+    DART 공시 본문은 자체 태그(<TITLE>, <P>, <TABLE>...) 또는 HTML이 섞여 있다.
+    XML로 못 파싱하면 정규식 fallback.
+
+    Returns:
+        (텍스트, truncated_여부)
+    """
+    text: str = ""
+    try:
+        parser = etree.XMLParser(recover=True, huge_tree=True)
+        root = etree.fromstring(xml_bytes, parser=parser)
+        if root is not None:
+            # method='text'는 모든 자식 텍스트 노드를 이어붙임
+            text = etree.tostring(root, method="text", encoding="unicode") or ""
+    except Exception:
+        text = ""
+
+    if not text:
+        # XML 파싱 실패 — UTF-8/CP949 fallback + 정규식으로 태그 제거
+        for enc in ("utf-8", "cp949", "euc-kr"):
+            try:
+                raw = xml_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raw = xml_bytes.decode("utf-8", errors="replace")
+        text = re.sub(r"<[^>]+>", " ", raw)
+
+    # 공백 정리
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= limit:
+        return text, False
+    return text[:limit], True
+
+
+@cached(ttl_seconds=24 * 3600)
+async def _fetch_document_zip(rcept_no: str) -> bytes:
+    return await get_bytes("/document.xml", params={"rcept_no": rcept_no})
+
+
+def _parse_document_zip(raw: bytes) -> tuple[list[str], str, bool]:
+    """document.xml 응답을 파싱해 (파일목록, 본문 텍스트 발췌, truncated) 반환."""
+    if raw[:2] != b"PK":
+        # zip이 아니면 일반 XML로 직접 파싱 시도
+        text, trunc = _extract_text_from_xml(raw, limit=_DOC_TEXT_LIMIT)
+        return [], text, trunc
+
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+        if not names:
+            return [], "(빈 zip)", False
+        # 본문은 보통 첫 .xml 또는 가장 큰 .xml
+        xml_names = [n for n in names if n.lower().endswith(".xml")]
+        target = xml_names[0] if xml_names else names[0]
+        with zf.open(target) as fp:
+            payload = fp.read()
+        text, trunc = _extract_text_from_xml(payload, limit=_DOC_TEXT_LIMIT)
+    return names, text, trunc
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_disclosure_detail")
+async def get_disclosure_detail(rcept_no: str) -> str:
+    """공시본문 — rcept_no로 공시 원문 zip을 받아 본문 텍스트 발췌 + viewer URL을 반환.
+
+    DART는 공시 본문을 zip으로 제공합니다 (내부에 다수의 XML/HTML). 이 도구는:
+    - 첫 본문 XML에서 텍스트만 추출해 발췌(최대 4000자)로 반환
+    - zip 내 모든 파일명 리스트
+    - 사용자가 전체 원문을 보고 싶을 때를 위한 DART viewer URL
+
+    rcept_no는 list_disclosures 결과에서 얻습니다 (14자리).
+
+    Args:
+        rcept_no: DART 공시 접수번호 14자리.
+
+    Returns:
+        제목 + viewer URL + 첨부 파일 목록 + 본문 텍스트 발췌.
+    """
+    no = normalize_rcept_no(rcept_no)
+    raw = await _fetch_document_zip(no)
+    names, text, truncated = _parse_document_zip(raw)
+
+    lines = [
+        f"# 공시 본문 (rcept_no={no})",
+        "",
+        f"**원문 보기:** {_viewer_url(no)}",
+    ]
+    if names:
+        lines.append("")
+        lines.append(f"**zip 내 파일 ({len(names)}건):**")
+        for n in names[:20]:
+            lines.append(f"- {n}")
+        if len(names) > 20:
+            lines.append(f"- ... 외 {len(names) - 20}건")
+
+    lines.append("")
+    lines.append("## 본문 발췌")
+    lines.append("")
+    lines.append(text or "(본문 텍스트를 추출하지 못했습니다. viewer URL에서 원문 확인.)")
+    if truncated:
+        lines.append("")
+        lines.append(f"_본문이 {_DOC_TEXT_LIMIT}자로 잘렸습니다. 전체는 viewer URL에서._")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """`dartmcp` 진입점 — stdio MCP 서버 실행."""
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()

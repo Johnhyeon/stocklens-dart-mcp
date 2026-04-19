@@ -1,0 +1,52 @@
+[project]
+name = "dart-mcp-server"
+version = "0.2.0"
+description = "DART MCP — 금융감독원 전자공시(DART OpenAPI) 래핑 MCP 서버. 공시 검색·본문·재무제표 조회를 Claude에서 자연어로."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Johnhyeon" }
+]
+keywords = ["mcp", "claude", "dart", "opendart", "fss", "korea", "finance", "disclosure", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Natural Language :: Korean",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "mcp[cli]>=1.12.0",
+    "httpx>=0.27.0",
+    "lxml>=5.0.0",
+    "keyring>=24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Johnhyeon/dart-mcp-server"
+Repository = "https://github.com/Johnhyeon/dart-mcp-server"
+Issues = "https://github.com/Johnhyeon/dart-mcp-server/issues"
+
+[project.scripts]
+dartmcp = "dart_mcp_server.server:main"
+dartmcp-setup = "dart_mcp_server.setup_claude:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dart_mcp_server"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".github/",
+    "tests/",
+    "CLAUDE.md",
+]
