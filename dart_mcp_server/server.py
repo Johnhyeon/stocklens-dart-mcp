@@ -47,7 +47,8 @@ Claude가 조정자입니다.
 
 - `search_company`: 종목명/코드 → corp_code + 기업개황
 - `list_disclosures`: 기간/유형별 공시 목록 (rcept_no는 후속 도구의 키)
-- `get_disclosure_detail`: rcept_no → 공시 본문 발췌 + DART viewer URL + 첨부 목록
+- `get_disclosure_detail`: rcept_no → 공시 본문. 짧은 공시는 발췌, 긴 보고서(사업/분기/반기)는
+  인덱스+viewer URL만. `find="키워드"` 인자로 본문 키워드 검색 가능.
 - `get_major_accounts`: 정기보고서의 핵심 재무 (매출/영업이익/순이익/자산/부채/자본 등) — 당기·전기·전전기 비교
 - `get_full_financial`: 전체 재무제표. sj_div(BS/IS/CIS/CF/SCE) 필수 — 토큰 폭발 방지
 - `get_major_holders`: 5%룰 대량보유 변동 — 외국인/펀드/행동주의 진입 추적 (시세에 안 나오는 자본 흐름)
@@ -418,7 +419,7 @@ async def _fetch_major_accounts(corp_code: str, bsns_year: str, reprt_code: str)
 
 
 def _fmt_amount(value) -> str:
-    """천단위 콤마. 음수/빈값 안전 처리."""
+    """천단위 콤마. 음수/빈값 안전 처리. 주식수·EPS·작은 금액용."""
     if value is None:
         return "-"
     s = str(value).strip()
@@ -441,6 +442,48 @@ def _fmt_amount(value) -> str:
         except ValueError:
             pass
     return (sign + s)
+
+
+def _fmt_won(value) -> str:
+    """한국 원 단위 압축 — 큰 숫자 토큰 효율 개선용 (재무 표 전용).
+
+    토큰 효율: '300,870,903,000,000' → '300조 8,709억' (~9 토큰 → ~5 토큰).
+
+    규칙:
+    - 1조(10^12) 이상: 'N조 M억' (M=0이면 '조'만)
+    - 1억(10^8) 이상: 'N억' (억 미만 절사 — 가독성 우선)
+    - 그 미만 또는 소수점 포함: _fmt_amount fallback (콤마)
+
+    매출/영업이익/자산 등 재무 표에 적용. 주식수·EPS·증감 컬럼은 _fmt_amount 그대로.
+    """
+    if value is None:
+        return "-"
+    s = str(value).strip()
+    if not s or s == "-":
+        return "-"
+    sign = ""
+    if s.startswith("-"):
+        sign, s = "-", s[1:]
+    elif s.startswith("(") and s.endswith(")"):
+        sign, s = "-", s[1:-1]
+    digits = s.replace(",", "")
+    if not digits.isdigit():
+        # 소수점 / 비숫자 → 그대로 콤마 처리
+        return _fmt_amount(value)
+
+    n = int(digits)
+    JO = 1_000_000_000_000
+    EOK = 100_000_000
+
+    if n >= JO:
+        jo = n // JO
+        eok = (n % JO) // EOK
+        if eok > 0:
+            return f"{sign}{jo:,}조 {eok:,}억"
+        return f"{sign}{jo:,}조"
+    if n >= EOK:
+        return f"{sign}{n // EOK:,}억"
+    return f"{sign}{n:,}"
 
 
 def _dedup_account_rows(items: list[dict]) -> list[dict]:
@@ -532,10 +575,10 @@ def _format_major_accounts(
                 lines.append("|---|---:|---:|")
             for r in rows_sorted:
                 acc = (r.get("account_nm") or "").strip() or "(이름없음)"
-                cur = _fmt_amount(r.get("thstrm_amount"))
-                prev = _fmt_amount(r.get("frmtrm_amount"))
+                cur = _fmt_won(r.get("thstrm_amount"))
+                prev = _fmt_won(r.get("frmtrm_amount"))
                 if has_bfe:
-                    bfe = _fmt_amount(r.get("bfefrmtrm_amount"))
+                    bfe = _fmt_won(r.get("bfefrmtrm_amount"))
                     lines.append(f"| {acc} | {cur} | {prev} | {bfe} |")
                 else:
                     lines.append(f"| {acc} | {cur} | {prev} |")
@@ -683,17 +726,17 @@ def _format_full_financial(
 
     for r in items_sorted:
         acc = (r.get("account_nm") or "").strip() or "(이름없음)"
-        cur = _fmt_amount(r.get("thstrm_amount"))
-        prev = _fmt_amount(r.get("frmtrm_amount"))
+        cur = _fmt_won(r.get("thstrm_amount"))
+        prev = _fmt_won(r.get("frmtrm_amount"))
         if has_bfe:
-            bfe = _fmt_amount(r.get("bfefrmtrm_amount"))
+            bfe = _fmt_won(r.get("bfefrmtrm_amount"))
             lines.append(f"| {acc} | {cur} | {prev} | {bfe} |")
         else:
             lines.append(f"| {acc} | {cur} | {prev} |")
 
     currency = (items[0].get("currency") or "KRW").strip()
     lines.append("")
-    lines.append(f"_통화: {currency}. 단위는 DART 원본 그대로._")
+    lines.append(f"_통화: {currency}. 1억 이상은 '억/조' 단위 압축, 미만은 콤마. 정확한 원 단위는 DART 원본 참조._")
     return "\n".join(lines)
 
 
@@ -929,8 +972,13 @@ import zipfile
 
 from lxml import etree
 
-# 본문 텍스트 발췌 길이 — 너무 크면 LLM context 폭발
-_DOC_TEXT_LIMIT = 4000
+# 짧은 공시 발췌 상한 (단순 본문 반환 시)
+_SHORT_EXCERPT_CHARS = 3000
+# 이 길이를 넘으면 '긴 보고서'로 간주 — 본문 대신 인덱스+find 안내 반환
+_LONG_REPORT_THRESHOLD = 8000
+# find 모드 — 매치당 주변 context
+_FIND_CONTEXT_CHARS = 300
+_FIND_MAX_MATCHES = 5
 
 
 def _viewer_url(rcept_no: str) -> str:
@@ -938,42 +986,32 @@ def _viewer_url(rcept_no: str) -> str:
     return f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
 
 
-def _extract_text_from_xml(xml_bytes: bytes, *, limit: int) -> tuple[str, bool]:
-    """DART 공시 본문 XML(또는 HTML 임베드)에서 사람이 읽을 텍스트만 추출.
+def _extract_full_text(xml_bytes: bytes) -> str:
+    """DART 공시 본문 XML에서 사람이 읽을 텍스트를 **전체** 추출 (cap 없음).
 
-    DART 공시 본문은 자체 태그(<TITLE>, <P>, <TABLE>...) 또는 HTML이 섞여 있다.
-    XML로 못 파싱하면 정규식 fallback.
-
-    Returns:
-        (텍스트, truncated_여부)
+    호출처에서 필요한 만큼만 사용. XML 파싱 실패 시 정규식 fallback.
     """
     text: str = ""
     try:
         parser = etree.XMLParser(recover=True, huge_tree=True)
         root = etree.fromstring(xml_bytes, parser=parser)
         if root is not None:
-            # method='text'는 모든 자식 텍스트 노드를 이어붙임
             text = etree.tostring(root, method="text", encoding="unicode") or ""
     except Exception:
         text = ""
 
     if not text:
-        # XML 파싱 실패 — UTF-8/CP949 fallback + 정규식으로 태그 제거
         for enc in ("utf-8", "cp949", "euc-kr"):
             try:
-                raw = xml_bytes.decode(enc)
+                raw_str = xml_bytes.decode(enc)
                 break
             except UnicodeDecodeError:
                 continue
         else:
-            raw = xml_bytes.decode("utf-8", errors="replace")
-        text = re.sub(r"<[^>]+>", " ", raw)
+            raw_str = xml_bytes.decode("utf-8", errors="replace")
+        text = re.sub(r"<[^>]+>", " ", raw_str)
 
-    # 공백 정리
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) <= limit:
-        return text, False
-    return text[:limit], True
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @cached(ttl_seconds=24 * 3600)
@@ -981,49 +1019,57 @@ async def _fetch_document_zip(rcept_no: str) -> bytes:
     return await get_bytes("/document.xml", params={"rcept_no": rcept_no})
 
 
-def _parse_document_zip(raw: bytes) -> tuple[list[str], str, bool]:
-    """document.xml 응답을 파싱해 (파일목록, 본문 텍스트 발췌, truncated) 반환."""
+def _parse_document_zip(raw: bytes) -> tuple[list[str], str]:
+    """document.xml 응답 파싱. (파일목록, 본문 풀 텍스트) — cap 없음."""
     if raw[:2] != b"PK":
-        # zip이 아니면 일반 XML로 직접 파싱 시도
-        text, trunc = _extract_text_from_xml(raw, limit=_DOC_TEXT_LIMIT)
-        return [], text, trunc
-
+        return [], _extract_full_text(raw)
     with zipfile.ZipFile(io.BytesIO(raw)) as zf:
         names = zf.namelist()
         if not names:
-            return [], "(빈 zip)", False
-        # 본문은 보통 첫 .xml 또는 가장 큰 .xml
+            return [], "(빈 zip)"
         xml_names = [n for n in names if n.lower().endswith(".xml")]
         target = xml_names[0] if xml_names else names[0]
         with zf.open(target) as fp:
             payload = fp.read()
-        text, trunc = _extract_text_from_xml(payload, limit=_DOC_TEXT_LIMIT)
-    return names, text, trunc
+    return names, _extract_full_text(payload)
 
 
-@mcp.tool()
-@safe_tool
-@track_metrics("get_disclosure_detail")
-async def get_disclosure_detail(rcept_no: str) -> str:
-    """공시본문 — rcept_no로 공시 원문 zip을 받아 본문 텍스트 발췌 + viewer URL을 반환.
+def _guess_title(text: str) -> str:
+    """본문 첫 100자 중 의미 있는 첫 라인 추정 — 보고서명 노출용."""
+    head = text[:200].strip()
+    # 공백 여러 개 앞에서 자르기 (DART 공시 본문은 종종 '사업보고서  N.N  회사명 ...' 형식)
+    m = re.split(r"\s{2,}", head)
+    if m and m[0]:
+        return m[0][:80]
+    return head[:80]
 
-    DART는 공시 본문을 zip으로 제공합니다 (내부에 다수의 XML/HTML). 이 도구는:
-    - 첫 본문 XML에서 텍스트만 추출해 발췌(최대 4000자)로 반환
-    - zip 내 모든 파일명 리스트
-    - 사용자가 전체 원문을 보고 싶을 때를 위한 DART viewer URL
 
-    rcept_no는 list_disclosures 결과에서 얻습니다 (14자리).
+def _find_matches(text: str, keyword: str) -> list[dict]:
+    """case-insensitive 키워드 매치. 위치 + 컨텍스트 리스트 반환."""
+    results: list[dict] = []
+    lower = text.lower()
+    kw_lower = keyword.lower()
+    pos = 0
+    while len(results) < _FIND_MAX_MATCHES:
+        idx = lower.find(kw_lower, pos)
+        if idx < 0:
+            break
+        start = max(0, idx - _FIND_CONTEXT_CHARS)
+        end = min(len(text), idx + len(keyword) + _FIND_CONTEXT_CHARS)
+        left = text[start:idx]
+        match = text[idx:idx + len(keyword)]
+        right = text[idx + len(keyword):end]
+        snippet = f"{left}**{match}**{right}"
+        if start > 0:
+            snippet = "…" + snippet
+        if end < len(text):
+            snippet = snippet + "…"
+        results.append({"pos": idx, "snippet": snippet})
+        pos = idx + len(keyword)
+    return results
 
-    Args:
-        rcept_no: DART 공시 접수번호 14자리.
 
-    Returns:
-        제목 + viewer URL + 첨부 파일 목록 + 본문 텍스트 발췌.
-    """
-    no = normalize_rcept_no(rcept_no)
-    raw = await _fetch_document_zip(no)
-    names, text, truncated = _parse_document_zip(raw)
-
+def _format_short_disclosure(*, no: str, names: list[str], text: str) -> str:
     lines = [
         f"# 공시 본문 (rcept_no={no})",
         "",
@@ -1032,19 +1078,123 @@ async def get_disclosure_detail(rcept_no: str) -> str:
     if names:
         lines.append("")
         lines.append(f"**zip 내 파일 ({len(names)}건):**")
-        for n in names[:20]:
+        for n in names[:10]:
             lines.append(f"- {n}")
-        if len(names) > 20:
-            lines.append(f"- ... 외 {len(names) - 20}건")
+        if len(names) > 10:
+            lines.append(f"- ... 외 {len(names) - 10}건")
 
     lines.append("")
-    lines.append("## 본문 발췌")
+    lines.append(f"## 본문 발췌 (전체 {len(text):,}자)")
     lines.append("")
-    lines.append(text or "(본문 텍스트를 추출하지 못했습니다. viewer URL에서 원문 확인.)")
-    if truncated:
+    if len(text) <= _SHORT_EXCERPT_CHARS:
+        lines.append(text or "(본문 텍스트를 추출하지 못했습니다. viewer URL에서 원문 확인.)")
+    else:
+        lines.append(text[:_SHORT_EXCERPT_CHARS])
         lines.append("")
-        lines.append(f"_본문이 {_DOC_TEXT_LIMIT}자로 잘렸습니다. 전체는 viewer URL에서._")
+        lines.append(f"_본문 {_SHORT_EXCERPT_CHARS}자까지 표시. 전체는 viewer URL._")
     return "\n".join(lines)
+
+
+def _format_long_report(*, no: str, names: list[str], text: str) -> str:
+    title = _guess_title(text)
+    lines = [
+        f"# 긴 보고서 (rcept_no={no})",
+        "",
+        f"**원문 보기:** {_viewer_url(no)}",
+        "",
+        f"**추정 제목:** {title}",
+        f"**본문 길이:** {len(text):,}자 (긴 보고서 — 본문 발췌 생략)",
+    ]
+    if names:
+        lines.append("")
+        lines.append(f"**zip 내 파일 ({len(names)}건):**")
+        for n in names[:10]:
+            lines.append(f"- {n}")
+        if len(names) > 10:
+            lines.append(f"- ... 외 {len(names) - 10}건")
+
+    lines.append("")
+    lines.append("## 본문을 읽는 방법")
+    lines.append("")
+    lines.append("긴 정기보고서(사업/반기/분기/감사)는 본문이 수십 페이지라 토큰 절약을 위해 발췌하지 않습니다.")
+    lines.append("")
+    lines.append("- **특정 정보만 필요:** `get_disclosure_detail(rcept_no=..., find='키워드')` 로 재호출")
+    lines.append("  - 매치 주변 ±300자, 최대 5건 발췌")
+    lines.append("  - 예: `find='신사업'`, `find='배당'`, `find='주요 제품'`")
+    lines.append("- **전체 본문 필요:** 위 viewer URL 클릭 (PDF/HTML 뷰어)")
+    return "\n".join(lines)
+
+
+def _format_find_results(
+    *, no: str, keyword: str, matches: list[dict], total_len: int
+) -> str:
+    lines = [
+        f"# 공시 본문 키워드 검색 (rcept_no={no})",
+        "",
+        f"**원문 보기:** {_viewer_url(no)}",
+        f"**검색어:** `{keyword}`",
+        f"**본문 전체 길이:** {total_len:,}자",
+    ]
+    if not matches:
+        lines.append("")
+        lines.append(f"'{keyword}' 매치 없음. 다른 키워드로 시도하거나 viewer URL에서 직접 확인하세요.")
+        return "\n".join(lines)
+
+    lines.append(f"**매치:** {len(matches)}건 (최대 {_FIND_MAX_MATCHES}건 표시)")
+    for i, m in enumerate(matches, 1):
+        lines.append("")
+        lines.append(f"## 매치 {i} (위치 ~{m['pos']:,})")
+        lines.append("")
+        lines.append(m["snippet"])
+    if len(matches) >= _FIND_MAX_MATCHES:
+        lines.append("")
+        lines.append(f"_최대 {_FIND_MAX_MATCHES}건까지 표시. 더 많은 결과는 viewer에서._")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+@safe_tool
+@track_metrics("get_disclosure_detail")
+async def get_disclosure_detail(rcept_no: str, find: str | None = None) -> str:
+    """공시본문 — rcept_no로 공시 원문을 조회. 보고서 길이에 따라 자동 분기.
+
+    ## 동작 분기
+
+    1. **find 인자 있음** — 키워드 검색 모드 (길이 무관):
+       본문에서 keyword를 case-insensitive로 찾아 매치 주변 ±300자씩 최대 5건 반환.
+       예: find="신사업", find="배당금", find="주요 제품"
+       → 긴 보고서에서 특정 정보만 효율적으로 추출.
+    2. **짧은 공시** (본문 ≤ 8000자): 본문 최대 3000자 발췌 + viewer URL.
+       대량보유·임원 매매·단일계약 등 대부분 공시.
+    3. **긴 보고서** (본문 > 8000자): 본문 생략. 제목 추정 + zip 파일 목록 + viewer URL +
+       find 사용 안내. 사업/반기/분기/감사 보고서가 여기 해당 — 본문이 수십~수백 페이지라
+       전체를 토큰에 박으면 context 낭비.
+
+    ## 자주 쓰는 패턴
+
+    - 단순 본문 보기: `get_disclosure_detail(rcept_no)` — 짧은 공시면 발췌, 긴 보고서면 인덱스
+    - 긴 보고서에서 키워드: `get_disclosure_detail(rcept_no, find="신사업")`
+
+    Args:
+        rcept_no: DART 공시 접수번호 14자리 (list_disclosures 결과에서 얻음).
+        find: 본문 검색 키워드 (선택). 지정 시 키워드 검색 모드.
+
+    Returns:
+        분기별 포맷팅된 마크다운 — viewer URL은 항상 포함.
+    """
+    no = normalize_rcept_no(rcept_no)
+    raw = await _fetch_document_zip(no)
+    names, text = _parse_document_zip(raw)
+
+    if find and find.strip():
+        matches = _find_matches(text, find.strip())
+        return _format_find_results(
+            no=no, keyword=find.strip(), matches=matches, total_len=len(text)
+        )
+
+    if len(text) > _LONG_REPORT_THRESHOLD:
+        return _format_long_report(no=no, names=names, text=text)
+    return _format_short_disclosure(no=no, names=names, text=text)
 
 
 # ---------------------------------------------------------------------------

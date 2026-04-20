@@ -67,7 +67,7 @@ dartmcp-setup --plaintext <KEY>
 |---|---|
 | `search_company` | 종목명/종목코드 → corp_code + 기업개황 |
 | `list_disclosures` | 기간·유형별 공시 목록 (rcept_no 반환) |
-| `get_disclosure_detail` | rcept_no → 본문 발췌 + DART viewer URL + 첨부 목록 |
+| `get_disclosure_detail` | 짧은 공시는 본문 발췌, 긴 보고서는 인덱스 + viewer URL. `find="키워드"`로 본문 검색 |
 | `get_major_accounts` | 정기보고서 핵심 재무 (매출/영업이익/순이익/자산/부채/자본 — 당기·전기·전전기 비교) |
 | `get_full_financial` | 전체 재무제표. sj_div(BS/IS/CIS/CF/SCE) 필수 |
 | `get_major_holders` | 5%룰 대량보유 변동 — 외인/펀드/행동주의 진입 추적 |
@@ -79,7 +79,8 @@ dartmcp-setup --plaintext <KEY>
 # 공시 흐름
 search_company("삼성전자") → corp_code "00126380"
 list_disclosures(corp_code="00126380", days=30) → rcept_no 목록
-get_disclosure_detail(rcept_no="20240315001234") → 본문 발췌
+get_disclosure_detail(rcept_no="...") → 짧은 공시는 본문, 긴 보고서는 인덱스
+get_disclosure_detail(rcept_no="...", find="신사업") → 긴 보고서에서 키워드 매치 ±300자
 
 # 재무 흐름
 search_company("삼성전자") → corp_code
