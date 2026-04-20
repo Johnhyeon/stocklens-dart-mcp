@@ -2,6 +2,6 @@
 try:
     from importlib.metadata import version as _pkg_version
 
-    __version__ = _pkg_version("dart-mcp-server")
+    __version__ = _pkg_version("stocklens-dart-mcp")
 except Exception:
     __version__ = "0.0.0"

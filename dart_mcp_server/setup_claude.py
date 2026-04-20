@@ -1,6 +1,6 @@
 """Configure Claude Desktop to use the DART MCP server.
 
-Run `dartmcp-setup` after `pip install dart-mcp-server`.
+Run `dartmcp-setup` after `pip install stocklens-dart-mcp`.
 
 기본 동작 (권장):
     1. 키 입력받기 (인자 / 대화형 / DART_API_KEY env fallback)

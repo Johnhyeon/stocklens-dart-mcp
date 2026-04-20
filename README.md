@@ -11,7 +11,7 @@
 ## 빠른 시작
 
 ```bash
-pip install dart-mcp-server
+pip install stocklens-dart-mcp
 dartmcp-setup
 ```
 

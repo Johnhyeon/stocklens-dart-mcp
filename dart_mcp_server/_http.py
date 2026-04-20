@@ -31,7 +31,7 @@ _BASE_URL = "https://opendart.fss.or.kr/api"
 _TIMEOUT = 15.0  # 공시 본문/재무제표는 응답이 클 수 있어 stocklens(8s)보다 여유
 
 _HEADERS = {
-    "User-Agent": "dart-mcp-server (+https://github.com/Johnhyeon/dart-mcp-server)",
+    "User-Agent": "stocklens-dart-mcp (+https://github.com/Johnhyeon/stocklens-dart-mcp)",
     "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
 }
 
