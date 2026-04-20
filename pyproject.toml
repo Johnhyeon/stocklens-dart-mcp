@@ -29,9 +29,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Johnhyeon/dart-mcp-server"
-Repository = "https://github.com/Johnhyeon/dart-mcp-server"
-Issues = "https://github.com/Johnhyeon/dart-mcp-server/issues"
+Homepage = "https://github.com/Johnhyeon/stocklens-dart-mcp"
+Repository = "https://github.com/Johnhyeon/stocklens-dart-mcp"
+Issues = "https://github.com/Johnhyeon/stocklens-dart-mcp/issues"
 
 [project.scripts]
 dartmcp = "dart_mcp_server.server:main"
