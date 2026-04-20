@@ -2,7 +2,7 @@
 
 금융감독원 **전자공시(DART) OpenAPI**를 Claude에서 자연어로 조회할 수 있게 해주는 MCP 서버입니다.
 
-> "삼성전자 최근 분기보고서 요약해줘", "카카오 최근 1개월 공시 목록", "LG에너지솔루션 영업이익 추이"
+> "삼성전자 최근 분기보고서 요약해줘" · "카카오 최근 1개월 공시 목록" · "LG에너지솔루션 영업이익 추이" · "삼성전자 5% 이상 보유한 주주 변동" · "현대차 임원들 자사주 매매 보여줘"
 
 자매 프로젝트 [stocklens-mcp](https://github.com/Johnhyeon/stocklens-mcp)(네이버 증권 기반 시세·차트·수급)와 **독립**입니다. Claude가 두 MCP를 조합해 종목 분석을 수행합니다.
 
@@ -37,7 +37,7 @@ API 키가 없다면 먼저 [DART OpenAPI 발급](https://opendart.fss.or.kr/uss
 - config 파일에는 `mcpServers.dart-mcp.command` 만 들어가고 키는 들어가지 않음
 - 서버는 부팅 시 `DART_API_KEY` 환경변수를 먼저 보고, 없으면 키체인에서 자동 조회
 
-기존 v0.1.0에서 평문으로 박혀있던 키는 `dartmcp-setup`을 다시 실행하면 자동으로 키체인으로 이전되고 JSON에서 제거됩니다.
+JSON config에 평문 `DART_API_KEY`가 박혀있는 환경에서 `dartmcp-setup`을 다시 실행하면 자동으로 키체인으로 이전되고 JSON에서 제거됩니다.
 
 ### 평문 모드 (헤드리스 환경 fallback)
 
@@ -76,6 +76,11 @@ search_company("삼성전자") → corp_code
 get_major_accounts(corp_code, bsns_year=2024, reprt_code="annual") → 핵심 수치
 get_full_financial(corp_code, bsns_year=2024, reprt_code="annual",
                    fs_div="CFS", sj_div="IS") → 손익 전체
+
+# 지분 흐름 (시세에 안 나오는 자본 움직임)
+search_company("삼성전자") → corp_code
+get_major_holders(corp_code, limit=10) → 5%룰 보고서 (외인/펀드/행동주의)
+get_insider_trades(corp_code, limit=10) → 임원·주요주주 자사주 매매
 ```
 
 ---
