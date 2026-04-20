@@ -12,13 +12,23 @@
 
 ```bash
 pip install stocklens-dart-mcp
+
+# 1) 키를 인자로 직접 넘기기 (권장)
+dartmcp-setup <DART_API_KEY>
+
+# 2) 또는 인자 없이 실행 → 대화형으로 입력
 dartmcp-setup
+
+# 3) 환경변수로 미리 넘기고 싶다면
+#   PowerShell:  $env:DART_API_KEY="..."; dartmcp-setup
+#   bash:        DART_API_KEY=... dartmcp-setup
 ```
 
 `dartmcp-setup`은:
 
-1. DART API 키를 입력받아 **유효성 검증**한 뒤
-2. Claude Desktop의 `claude_desktop_config.json`에 자동 등록
+1. DART API 키를 받아 **유효성 검증** (삼성전자 기업개황 1회 호출)
+2. 키를 **OS 키체인**에 저장 (Windows DPAPI / macOS Keychain / Linux Secret Service)
+3. Claude Desktop의 `claude_desktop_config.json`에 `mcpServers.dart-mcp` 엔트리 등록 (키는 JSON에 박지 않음)
 
 API 키가 없다면 먼저 [DART OpenAPI 발급](https://opendart.fss.or.kr/uss/umt/EgovMberInsertView.do) (무료, 분당 1,000건 / 일 20,000건).
 
