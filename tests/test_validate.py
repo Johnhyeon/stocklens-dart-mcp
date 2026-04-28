@@ -17,7 +17,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from dart_mcp_server._validate import (
+from dartlens._validate import (
     days_to_range,
     normalize_bsns_year,
     normalize_corp_code,

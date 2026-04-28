@@ -1,6 +1,6 @@
 """토큰 핫스팟 측정 — 각 도구의 대표 시나리오를 라이브 호출해 응답 크기 측정.
 
-목적: dart-mcp 호출이 Claude 컨텍스트에서 차지하는 토큰을 도구·시나리오별로
+목적: dartlens 호출이 Claude 컨텍스트에서 차지하는 토큰을 도구·시나리오별로
 정량화. 핫스팟을 식별해 표적 최적화 (단위 변환, 행 필터, 표 압축 등) 우선순위 결정.
 
 측정 방식:
@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from dart_mcp_server.server import (
+from dartlens.server import (
     get_disclosure_detail,
     get_full_financial,
     get_insider_trades,

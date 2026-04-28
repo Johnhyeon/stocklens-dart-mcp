@@ -1,6 +1,6 @@
 """MCP 도구 호출 메트릭 (JSONL).
 
-저장 위치: ~/.dart-mcp-server/logs/metrics_YYYYMMDD.jsonl
+저장 위치: ~/.dartlens/logs/metrics_YYYYMMDD.jsonl
 
 stocklens 메트릭과 호환되는 스키마로 기록한다 (timestamp/tool/duration_ms/output_chars/error).
 """
@@ -16,8 +16,15 @@ from typing import Any, Awaitable, Callable
 
 
 def get_data_dir() -> Path:
-    """사용자 홈 아래 dart-mcp-server 데이터 디렉토리."""
-    folder = Path.home() / ".dart-mcp-server"
+    """사용자 홈 아래 dartlens 데이터 디렉토리.
+
+    `~/.dartlens` 가 비어있고 legacy `~/.dart-mcp-server` 가 존재하면
+    그 경로를 그대로 반환해 기존 캐시(corpCode.xml)와 메트릭을 보존한다.
+    """
+    folder = Path.home() / ".dartlens"
+    legacy = Path.home() / ".dart-mcp-server"
+    if not folder.exists() and legacy.exists():
+        return legacy
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 

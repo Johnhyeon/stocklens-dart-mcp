@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from dart_mcp_server._safe import DartApiError, require_api_key
+from dartlens._safe import DartApiError, require_api_key
 
 # 보안: httpx/httpcore의 INFO 로그는 요청 URL을 그대로 찍는다.
 # DART는 crtfc_key를 query string으로 받기 때문에 그 로그가 stderr로 빠지면
@@ -31,7 +31,7 @@ _BASE_URL = "https://opendart.fss.or.kr/api"
 _TIMEOUT = 15.0  # 공시 본문/재무제표는 응답이 클 수 있어 stocklens(8s)보다 여유
 
 _HEADERS = {
-    "User-Agent": "stocklens-dart-mcp (+https://github.com/Johnhyeon/stocklens-dart-mcp)",
+    "User-Agent": "dartlens-mcp (+https://github.com/Johnhyeon/dartlens-mcp)",
     "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
 }
 

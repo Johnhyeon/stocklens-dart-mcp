@@ -33,7 +33,7 @@ def require_api_key() -> str:
         return key
 
     # 지연 import — keyring 모듈은 첫 사용 시점에만 로드
-    from dart_mcp_server._keyring import load as _load_from_keyring
+    from dartlens._keyring import load as _load_from_keyring
 
     stored = (_load_from_keyring() or "").strip()
     if stored:
@@ -41,7 +41,7 @@ def require_api_key() -> str:
 
     raise MissingApiKeyError(
         "DART API 키가 필요합니다.\n"
-        "터미널에서 `dartmcp-setup`을 실행해 키를 등록하세요.\n"
+        "터미널에서 `dartlens-setup`을 실행해 키를 등록하세요.\n"
         "키가 없다면 https://opendart.fss.or.kr 에서 무료 발급 가능."
     )
 

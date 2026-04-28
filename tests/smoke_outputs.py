@@ -5,7 +5,7 @@
     python tests/smoke_outputs.py --quick   # 핵심 happy path만
     python tests/smoke_outputs.py --section disclosures  # 한 섹션만
 
-DART_API_KEY는 환경변수 또는 OS 키체인(dartmcp-setup으로 등록)에서 자동 로드됨.
+DART_API_KEY는 환경변수 또는 OS 키체인(dartlens-setup으로 등록)에서 자동 로드됨.
 출력은 토큰 폭발 방지로 각 호출마다 첫 N줄/N자만 보여줌.
 """
 
@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from dart_mcp_server.server import (
+from dartlens.server import (
     get_disclosure_detail,
     get_full_financial,
     get_insider_trades,

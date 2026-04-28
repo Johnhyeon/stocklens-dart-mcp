@@ -18,8 +18,8 @@ from pathlib import Path
 
 from lxml import etree
 
-from dart_mcp_server._http import get_bytes
-from dart_mcp_server._metrics import get_data_dir
+from dartlens._http import get_bytes
+from dartlens._metrics import get_data_dir
 
 _CACHE_FILE = "corpCode.xml"
 _TTL_SECONDS = 7 * 24 * 3600  # 7일

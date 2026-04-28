@@ -4,16 +4,16 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
-from dart_mcp_server._cache import cached
-from dart_mcp_server._corp_code import (
+from dartlens._cache import cached
+from dartlens._corp_code import (
     CorpEntry,
     resolve_identifier,
     search_by_name,
 )
-from dart_mcp_server._http import get_bytes, get_json
-from dart_mcp_server._metrics import track_metrics
-from dart_mcp_server._safe import DartApiError, safe_tool
-from dart_mcp_server._validate import (
+from dartlens._http import get_bytes, get_json
+from dartlens._metrics import track_metrics
+from dartlens._safe import DartApiError, safe_tool
+from dartlens._validate import (
     days_to_range,
     normalize_bsns_year,
     normalize_corp_code,
@@ -1202,7 +1202,7 @@ async def get_disclosure_detail(rcept_no: str, find: str | None = None) -> str:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    """`dartmcp` 진입점 — stdio MCP 서버 실행."""
+    """`dartlens` 진입점 — stdio MCP 서버 실행."""
     mcp.run()
 
 

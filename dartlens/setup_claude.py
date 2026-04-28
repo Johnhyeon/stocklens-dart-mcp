@@ -1,13 +1,13 @@
-"""Configure Claude Desktop to use the DART MCP server.
+"""Configure Claude Desktop to use dartlens.
 
-Run `dartmcp-setup` after `pip install stocklens-dart-mcp`.
+Run `dartlens-setup` after `pip install dartlens-mcp`.
 
 기본 동작 (권장):
     1. 키 입력받기 (인자 / 대화형 / DART_API_KEY env fallback)
     2. DART에 1회 호출해 키 유효성 검증 (삼성전자 corp_code 기준)
     3. 키를 OS 키체인에 저장 (Windows DPAPI / macOS Keychain / Secret Service)
-    4. claude_desktop_config.json의 mcpServers.dart-mcp 엔트리 등록 — env에는 키를 두지 않음
-    5. (마이그레이션) 기존 config에 평문 키가 있으면 자동 제거
+    4. claude_desktop_config.json의 mcpServers.dartlens 엔트리 등록 — env에는 키를 두지 않음
+    5. (마이그레이션) legacy `dart-mcp` 엔트리·평문 키는 자동 제거
 
 평문 모드 (`--plaintext`):
     OS 키체인을 쓸 수 없는 환경(헤드리스 / 공유 계정 / 키체인이 막힌 정책)을 위한 fallback.
@@ -27,10 +27,10 @@ from pathlib import Path
 
 import httpx
 
-from dart_mcp_server import _keyring as keyring_helper
+from dartlens import _keyring as keyring_helper
 
-SERVER_KEY = "dart-mcp"
-LEGACY_KEYS: list[str] = []
+SERVER_KEY = "dartlens"
+LEGACY_KEYS: list[str] = ["dart-mcp"]
 
 # 검증용: 삼성전자(00126380) — DART에 항상 존재하는 안정적 corp_code
 _VALIDATE_URL = "https://opendart.fss.or.kr/api/company.json"
@@ -82,7 +82,7 @@ def validate_key(api_key: str) -> tuple[bool, str]:
 # Claude Desktop config 위치 / entry 결정
 # ---------------------------------------------------------------------------
 
-def resolve_server_entry(preferred_command: str = "dartmcp") -> dict:
+def resolve_server_entry(preferred_command: str = "dartlens") -> dict:
     if os.path.isabs(preferred_command) and Path(preferred_command).exists():
         return {"command": preferred_command}
 
@@ -101,7 +101,7 @@ def resolve_server_entry(preferred_command: str = "dartmcp") -> dict:
 
     return {
         "command": sys.executable,
-        "args": ["-m", "dart_mcp_server"],
+        "args": ["-m", "dartlens"],
     }
 
 
@@ -155,7 +155,7 @@ def _backup_and_load(config_path: Path) -> dict:
         return {}
 
 
-def configure(api_key: str, *, command: str = "dartmcp", plaintext: bool) -> None:
+def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> None:
     config_path = get_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -196,7 +196,7 @@ def configure(api_key: str, *, command: str = "dartmcp", plaintext: bool) -> Non
             print(f"  [ERROR] {e}", file=sys.stderr)
             print(
                 "  키체인을 쓸 수 없는 환경입니다. 평문 모드로 강제 저장하려면\n"
-                "    dartmcp-setup --plaintext <KEY>\n"
+                "    dartlens-setup --plaintext <KEY>\n"
                 "  를 사용하세요. (단, JSON 파일이 유출되면 키도 함께 노출됩니다.)",
                 file=sys.stderr,
             )
@@ -233,8 +233,8 @@ def configure(api_key: str, *, command: str = "dartmcp", plaintext: bool) -> Non
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="dartmcp-setup",
-        description="Register dart-mcp in Claude Desktop config and store the DART API key.",
+        prog="dartlens-setup",
+        description="Register dartlens in Claude Desktop config and store the DART API key.",
     )
     p.add_argument(
         "api_key",
@@ -243,8 +243,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--command",
-        default="dartmcp",
-        help="Claude Desktop이 실행할 커맨드 (기본: dartmcp).",
+        default="dartlens",
+        help="Claude Desktop이 실행할 커맨드 (기본: dartlens).",
     )
     p.add_argument(
         "--plaintext",
@@ -256,7 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     print("==============================================")
-    print("  DART MCP — Claude Desktop Setup")
+    print("  dartlens — Claude Desktop Setup")
     print("==============================================")
 
     args = _build_parser().parse_args()

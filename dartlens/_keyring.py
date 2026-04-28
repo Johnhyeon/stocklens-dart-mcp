@@ -14,8 +14,12 @@ DART API 키 보관.
 from __future__ import annotations
 
 # keyring은 startup-cost가 있을 수 있으므로 사용 시점에 import
-SERVICE_NAME = "dart-mcp-server"
+SERVICE_NAME = "dartlens"
 USERNAME = "DART_API_KEY"
+
+# 과거 SERVICE_NAME으로 저장된 키는 load() 시 fallback 으로 읽고
+# delete() 시 함께 정리해서 사용자 재설정 부담을 0으로 만든다.
+_LEGACY_SERVICE_NAMES: list[str] = ["dart-mcp-server"]
 
 
 class KeyringUnavailableError(RuntimeError):
@@ -44,7 +48,7 @@ def _get_backend():
             "이 환경에서는 OS 키체인을 사용할 수 없습니다 "
             "(헤드리스/원격 세션 가능성). "
             "claude_desktop_config.json의 env에 DART_API_KEY를 직접 두려면 "
-            "'dartmcp-setup --plaintext <KEY>' 를 사용하세요."
+            "'dartlens-setup --plaintext <KEY>' 를 사용하세요."
         )
 
     return keyring
@@ -58,28 +62,38 @@ def save(api_key: str) -> str:
 
 
 def load() -> str | None:
-    """키체인에서 키 조회. 없거나 백엔드 부재면 None."""
+    """키체인에서 키 조회. 없거나 백엔드 부재면 None.
+
+    현재 SERVICE_NAME에서 못 찾으면 _LEGACY_SERVICE_NAMES 도 순차 확인.
+    """
     try:
         keyring = _get_backend()
     except KeyringUnavailableError:
         return None
-    try:
-        return keyring.get_password(SERVICE_NAME, USERNAME)
-    except Exception:
-        return None
+    for service in (SERVICE_NAME, *_LEGACY_SERVICE_NAMES):
+        try:
+            value = keyring.get_password(service, USERNAME)
+        except Exception:
+            value = None
+        if value:
+            return value
+    return None
 
 
 def delete() -> bool:
-    """키체인에서 키 삭제. 삭제 시도 성공 여부 반환 (없었으면 False)."""
+    """키체인에서 키 삭제 (legacy 항목 포함). 하나라도 지웠으면 True."""
     try:
         keyring = _get_backend()
     except KeyringUnavailableError:
         return False
-    try:
-        keyring.delete_password(SERVICE_NAME, USERNAME)
-        return True
-    except Exception:
-        return False
+    deleted_any = False
+    for service in (SERVICE_NAME, *_LEGACY_SERVICE_NAMES):
+        try:
+            keyring.delete_password(service, USERNAME)
+            deleted_any = True
+        except Exception:
+            pass
+    return deleted_any
 
 
 def backend_name() -> str:
