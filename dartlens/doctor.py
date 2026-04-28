@@ -21,7 +21,8 @@ from pathlib import Path
 
 try:
     from dartlens.setup_claude import (
-        get_config_path,
+        get_claude_desktop_config_path,
+        get_claude_code_config_path,
         SERVER_KEY,
         LEGACY_KEYS,
         _uv_tool_bin_dirs,
@@ -30,7 +31,8 @@ try:
 except ImportError:
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from dartlens.setup_claude import (
-        get_config_path,
+        get_claude_desktop_config_path,
+        get_claude_code_config_path,
         SERVER_KEY,
         LEGACY_KEYS,
         _uv_tool_bin_dirs,
@@ -148,48 +150,27 @@ def check_dartlens_command() -> Check:
     return c
 
 
-def check_config() -> Check:
-    c = Check("Claude Desktop Config")
-    config_path = get_config_path()
+def _check_config_file(label: str, config_path: Path, *, required: bool) -> Check:
+    """단일 config 파일에 대한 점검. required=False면 부재 시 fail 대신 info."""
+    c = Check(f"Config — {label}")
 
     if "Packages" in str(config_path) and "LocalCache" in str(config_path):
         c.info("Detected: Microsoft Store version (sandboxed path)")
     c.info(f"Path:       {config_path}")
 
-    store = _find_store_config_path()
-    std_appdata = os.environ.get("APPDATA")
-    std_path = (
-        Path(std_appdata) / "Claude" / "claude_desktop_config.json"
-        if std_appdata
-        else None
-    )
-    if (
-        store
-        and std_path
-        and store.exists()
-        and std_path.exists()
-        and store != std_path
-    ):
-        c.warn(
-            f"Both Store and standard config files exist. Active: {config_path}",
-            fix=f"Remove unused: {std_path if config_path == store else store}",
-        )
-
     if not config_path.exists():
-        c.fail(
-            "Config file does not exist",
-            fix="dartlens-setup",
-        )
+        if required:
+            c.fail("Config file does not exist", fix="dartlens-setup")
+        else:
+            c.info("Config file does not exist (target not in use — OK)")
+            c.status = "info-skip"
         return c
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
     except json.JSONDecodeError as e:
-        c.fail(
-            f"Config is not valid JSON: {e}",
-            fix="Back up and re-run dartlens-setup",
-        )
+        c.fail(f"Config is not valid JSON: {e}", fix="Back up and re-run dartlens-setup")
         return c
     except Exception as e:
         c.fail(f"Cannot read config: {e}")
@@ -206,10 +187,20 @@ def check_config() -> Check:
         )
 
     if not entry:
-        c.fail(
-            f"'{SERVER_KEY}' entry missing in mcpServers",
-            fix="dartlens-setup",
-        )
+        # legacy 엔트리가 있다 = 이전에 이 클라이언트로 dartlens(또는 dart-mcp)를 쓰고 있었다 →
+        # 마이그레이션 미완료 상태라 fail.
+        if required or legacy_found:
+            msg = (
+                f"'{SERVER_KEY}' entry missing in mcpServers"
+                + (f" (legacy {legacy_found} present)" if legacy_found else "")
+            )
+            c.fail(
+                msg,
+                fix=f"dartlens-setup --target {label_to_target(label)}",
+            )
+        else:
+            c.info(f"'{SERVER_KEY}' entry not present (target not in use — OK)")
+            c.status = "info-skip"
         return c
 
     cmd = entry.get("command")
@@ -226,20 +217,50 @@ def check_config() -> Check:
         if Path(cmd).exists():
             c.ok("Command points to existing file")
         else:
-            c.fail(
-                f"Command file missing: {cmd}",
-                fix="dartlens-setup",
-            )
+            c.fail(f"Command file missing: {cmd}", fix="dartlens-setup")
     else:
         resolved = shutil.which(cmd)
         if resolved:
             c.ok(f"Command resolvable via PATH: {resolved}")
         else:
             c.fail(
-                f"Command '{cmd}' not in PATH — Claude Desktop will fail to launch",
+                f"Command '{cmd}' not in PATH — client will fail to launch the server",
                 fix="dartlens-setup",
             )
 
+    return c
+
+
+def label_to_target(label: str) -> str:
+    return "claude-code" if "Code" in label else "claude-desktop"
+
+
+def check_config_desktop() -> Check:
+    return _check_config_file(
+        "Claude Desktop", get_claude_desktop_config_path(), required=False
+    )
+
+
+def check_config_code() -> Check:
+    return _check_config_file(
+        "Claude Code CLI", get_claude_code_config_path(), required=False
+    )
+
+
+def check_at_least_one_config(*configs: Check) -> Check:
+    """두 config 모두 미등록이면 종합 fail. 하나라도 등록돼있으면 OK."""
+    c = Check("Registered targets")
+    registered = [
+        cc for cc in configs
+        if cc.status == "ok" or (cc.status == "warn" and "Legacy" in " ".join(cc.lines))
+    ]
+    if registered:
+        c.ok(f"{len(registered)} target(s) configured")
+        return c
+    c.fail(
+        "dartlens not registered in any MCP client (Claude Desktop / Code)",
+        fix="dartlens-setup --target {claude-desktop|claude-code|both}",
+    )
     return c
 
 
@@ -270,7 +291,13 @@ def check_api_key() -> Check:
     return c
 
 
-STATUS_ICON = {"ok": "[ OK ]", "warn": "[WARN]", "fail": "[FAIL]", None: "[ ?  ]"}
+STATUS_ICON = {
+    "ok": "[ OK ]",
+    "warn": "[WARN]",
+    "fail": "[FAIL]",
+    "info-skip": "[SKIP]",
+    None: "[ ?  ]",
+}
 
 
 def print_check(c: Check):
@@ -294,11 +321,16 @@ def main():
     print("=" * 60)
     print()
 
+    desktop_check = check_config_desktop()
+    code_check = check_config_code()
+
     checks = [
         check_uv(),
         check_package(),
         check_dartlens_command(),
-        check_config(),
+        desktop_check,
+        code_check,
+        check_at_least_one_config(desktop_check, code_check),
         check_api_key(),
     ]
 

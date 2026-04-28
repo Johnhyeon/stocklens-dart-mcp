@@ -68,8 +68,11 @@ if (Test-Path $LocalBin -PathType Container) {
     }
 }
 
-# ── [3/3] DART API key + Claude Desktop config ───────────
-Info "[3/3] Configuring Claude Desktop (DART API key required)..."
+# ── [3/3] MCP target config + DART API key ───────────────
+# $env:DARTLENS_TARGET 으로 등록 대상 지정: claude-desktop / claude-code / both / auto
+if (-not $env:DARTLENS_TARGET) { $env:DARTLENS_TARGET = "auto" }
+
+Info "[3/3] Configuring MCP (target=$($env:DARTLENS_TARGET), DART API key required)..."
 Write-Host "      DART API 키가 없다면 https://opendart.fss.or.kr 에서 무료 발급 (분당 1,000건 / 일 20,000건)"
 Write-Host ""
 

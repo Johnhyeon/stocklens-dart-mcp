@@ -152,7 +152,8 @@ def _find_store_config_path() -> Path | None:
     return None
 
 
-def get_config_path() -> Path:
+def get_claude_desktop_config_path() -> Path:
+    """Claude Desktop 앱의 mcpServers config 파일 경로."""
     if sys.platform == "win32":
         store = _find_store_config_path()
         if store is not None:
@@ -165,6 +166,28 @@ def get_config_path() -> Path:
         return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     else:
         return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def get_claude_code_config_path() -> Path:
+    """Claude Code CLI의 사용자 스코프 config (`~/.claude.json`).
+
+    Claude Code도 Claude Desktop과 동일하게 mcpServers 객체를 사용한다.
+    파일에는 사용자 설정·세션 등 다른 키가 같이 들어있을 수 있어 mcpServers
+    부분만 patching 한다.
+    """
+    return Path.home() / ".claude.json"
+
+
+# 하위 호환 — 기존 import 자리 유지
+def get_config_path() -> Path:
+    return get_claude_desktop_config_path()
+
+
+# (target name, 경로 함수, 사람이 읽는 라벨)
+TARGETS: dict[str, tuple] = {
+    "claude-desktop": (get_claude_desktop_config_path, "Claude Desktop"),
+    "claude-code": (get_claude_code_config_path, "Claude Code CLI"),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +210,54 @@ def _backup_and_load(config_path: Path) -> dict:
         return {}
 
 
-def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> None:
-    config_path = get_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+def _store_api_key(api_key: str, *, plaintext: bool, env_for_entry: dict) -> dict | None:
+    """API 키 저장 정책. 반환값은 entry에 박을 env dict (없으면 None).
 
+    keyring 모드: env에서 DART_API_KEY 제거, keyring에 저장.
+    plaintext 모드: env에 DART_API_KEY 박고 keyring 항목 삭제 (일관성).
+    """
+    env = dict(env_for_entry)
+    if plaintext:
+        env["DART_API_KEY"] = api_key
+        if keyring_helper.delete():
+            print("  [OK] Removed previous keyring entry (plaintext mode chosen)")
+        print("  [WARN] PLAINTEXT mode — DART_API_KEY is stored unencrypted in JSON config")
+        return env or None
+
+    had_plain = "DART_API_KEY" in env
+    env.pop("DART_API_KEY", None)
+    if had_plain:
+        print("  [OK] Migrated: removed plaintext DART_API_KEY from JSON config")
+
+    try:
+        backend = keyring_helper.save(api_key)
+        print(f"  [OK] Stored in OS keychain ({backend})")
+    except keyring_helper.KeyringUnavailableError as e:
+        print(f"  [ERROR] {e}", file=sys.stderr)
+        print(
+            "  키체인을 쓸 수 없는 환경입니다. 평문 모드로 강제 저장하려면\n"
+            "    dartlens-setup --plaintext <KEY>\n"
+            "  를 사용하세요. (단, JSON 파일이 유출되면 키도 함께 노출됩니다.)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return env or None
+
+
+def _configure_one_target(
+    config_path: Path,
+    label: str,
+    *,
+    api_key: str,
+    command: str,
+    plaintext: bool,
+    save_key: bool,
+) -> None:
+    """단일 config 파일(Claude Desktop 또는 Claude Code)에 mcpServers.dartlens 등록."""
+    print()
+    print(f"  → {label}")
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     config = _backup_and_load(config_path)
     config.setdefault("mcpServers", {})
 
@@ -201,38 +268,22 @@ def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> No
 
     entry = resolve_server_entry(command)
     existing = config["mcpServers"].get(SERVER_KEY) or {}
-    env = dict(existing.get("env") or {})
+    existing_env = dict(existing.get("env") or {})
 
-    if plaintext:
-        env["DART_API_KEY"] = api_key
-        if env:
-            entry["env"] = env
-        # 평문 모드면 keyring에 남아있는 옛 키도 정리해 일관성 유지
-        if keyring_helper.delete():
-            print("  [OK] Removed previous keyring entry (plaintext mode chosen)")
-        print("  [WARN] PLAINTEXT mode — DART_API_KEY is stored unencrypted in claude_desktop_config.json")
+    # 키 저장은 첫 타겟에서만 (여러 타겟이라도 keyring 한 번이면 충분)
+    if save_key:
+        env = _store_api_key(api_key, plaintext=plaintext, env_for_entry=existing_env)
     else:
-        # keyring 모드: env.DART_API_KEY는 절대 박지 않는다
-        had_plain = "DART_API_KEY" in env
-        env.pop("DART_API_KEY", None)
-        if env:
-            entry["env"] = env
-        # 다른 env 변수가 없으면 키를 비우는 대신 entry에서 env 자체를 생략
-        if had_plain:
-            print("  [OK] Migrated: removed plaintext DART_API_KEY from JSON config")
+        env = existing_env if plaintext else (
+            {k: v for k, v in existing_env.items() if k != "DART_API_KEY"} or None
+        )
+        # plaintext 모드에서 동일 키를 모든 타겟 entry에 박아두기
+        if plaintext:
+            env = dict(env or {})
+            env["DART_API_KEY"] = api_key
 
-        try:
-            backend = keyring_helper.save(api_key)
-            print(f"  [OK] Stored in OS keychain ({backend})")
-        except keyring_helper.KeyringUnavailableError as e:
-            print(f"  [ERROR] {e}", file=sys.stderr)
-            print(
-                "  키체인을 쓸 수 없는 환경입니다. 평문 모드로 강제 저장하려면\n"
-                "    dartlens-setup --plaintext <KEY>\n"
-                "  를 사용하세요. (단, JSON 파일이 유출되면 키도 함께 노출됩니다.)",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+    if env:
+        entry["env"] = env
 
     config["mcpServers"][SERVER_KEY] = entry
 
@@ -240,7 +291,7 @@ def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> No
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     print(f"  [OK] Config updated (key: {SERVER_KEY})")
-    print(f"  Path: {config_path}")
+    print(f"  Path:    {config_path}")
     print(f"  Command: {entry['command']}")
     if "args" in entry:
         print(f"  Args:    {' '.join(entry['args'])}")
@@ -248,7 +299,7 @@ def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> No
         if plaintext:
             print(f"  Env:     DART_API_KEY=***{api_key[-4:]} (plaintext)")
         else:
-            print(f"  Env:     {list(entry['env'].keys())} (no DART_API_KEY — stored in keychain)")
+            print(f"  Env:     {list(entry['env'].keys())} (no DART_API_KEY — keychain)")
     else:
         print("  Env:     (none — DART_API_KEY in keychain)")
 
@@ -259,6 +310,35 @@ def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> No
         print(f"  [WARN] '{cmd}' not found in PATH.")
 
 
+def configure(
+    api_key: str,
+    *,
+    command: str = "dartlens",
+    plaintext: bool,
+    targets: list[str] | None = None,
+) -> None:
+    """선택된 모든 타겟에 dartlens MCP 등록.
+
+    targets: ["claude-desktop"], ["claude-code"], 또는 ["claude-desktop", "claude-code"].
+    기본값은 ["claude-desktop"] (하위 호환).
+    """
+    targets = targets or ["claude-desktop"]
+    unknown = [t for t in targets if t not in TARGETS]
+    if unknown:
+        raise ValueError(f"Unknown target(s): {unknown}. Valid: {list(TARGETS.keys())}")
+
+    for i, target in enumerate(targets):
+        path_func, label = TARGETS[target]
+        _configure_one_target(
+            path_func(),
+            label,
+            api_key=api_key,
+            command=command,
+            plaintext=plaintext,
+            save_key=(i == 0),  # 키 저장은 첫 타겟에서만
+        )
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -266,7 +346,7 @@ def configure(api_key: str, *, command: str = "dartlens", plaintext: bool) -> No
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dartlens-setup",
-        description="Register dartlens in Claude Desktop config and store the DART API key.",
+        description="Register dartlens in Claude config (Desktop and/or Code CLI) and store the DART API key.",
     )
     p.add_argument(
         "api_key",
@@ -274,24 +354,66 @@ def _build_parser() -> argparse.ArgumentParser:
         help="DART OpenAPI 키. 생략 시 대화형 입력 또는 DART_API_KEY 환경변수.",
     )
     p.add_argument(
+        "--target",
+        choices=["claude-desktop", "claude-code", "both", "auto"],
+        default="auto",
+        help=(
+            "MCP 등록 대상. "
+            "claude-desktop=Claude Desktop 앱, claude-code=Claude Code CLI, "
+            "both=둘 다, auto=환경 자동 감지 (기본: auto). "
+            "DARTLENS_TARGET 환경변수로도 지정 가능."
+        ),
+    )
+    p.add_argument(
         "--command",
         default="dartlens",
-        help="Claude Desktop이 실행할 커맨드 (기본: dartlens).",
+        help="MCP 클라이언트가 실행할 커맨드 (기본: dartlens).",
     )
     p.add_argument(
         "--plaintext",
         action="store_true",
-        help="OS 키체인 대신 claude_desktop_config.json env에 키를 평문 저장 (헤드리스 환경 fallback).",
+        help="OS 키체인 대신 config env에 키를 평문 저장 (헤드리스 환경 fallback).",
     )
     return p
 
 
+def _resolve_targets(arg: str) -> list[str]:
+    """`--target` 인자를 실제 타겟 리스트로 해석. `auto`는 환경 감지."""
+    if arg == "both":
+        return ["claude-desktop", "claude-code"]
+    if arg in TARGETS:
+        return [arg]
+    if arg == "auto":
+        # env 우선
+        env_target = (os.environ.get("DARTLENS_TARGET") or "").strip().lower()
+        if env_target and env_target != "auto":
+            return _resolve_targets(env_target)
+
+        # 자동 감지:
+        #   1. `claude` CLI 존재 = Claude Code 사용 환경
+        #   2. Claude Desktop config 디렉토리 존재 = Desktop 사용 환경
+        #   3. 둘 다면 both, 둘 다 아니면 claude-desktop (가장 흔한 케이스)
+        has_code = shutil.which("claude") is not None
+        desktop_dir = get_claude_desktop_config_path().parent
+        has_desktop = desktop_dir.exists()
+
+        if has_code and has_desktop:
+            return ["claude-desktop", "claude-code"]
+        if has_code:
+            return ["claude-code"]
+        return ["claude-desktop"]
+    raise ValueError(f"Invalid target: {arg}")
+
+
 def main() -> None:
     print("==============================================")
-    print("  dartlens — Claude Desktop Setup")
+    print("  dartlens — MCP Setup")
     print("==============================================")
 
     args = _build_parser().parse_args()
+    targets = _resolve_targets(args.target)
+    target_labels = ", ".join(TARGETS[t][1] for t in targets)
+    print(f"  Targets: {target_labels}")
 
     api_key = (args.api_key or os.environ.get("DART_API_KEY", "")).strip()
     if not api_key:
@@ -312,9 +434,13 @@ def main() -> None:
         sys.exit(2)
     print(f"  [OK] {msg}")
 
-    print()
     try:
-        configure(api_key, command=args.command, plaintext=args.plaintext)
+        configure(
+            api_key,
+            command=args.command,
+            plaintext=args.plaintext,
+            targets=targets,
+        )
     except SystemExit:
         raise
     except Exception as e:
@@ -322,7 +448,10 @@ def main() -> None:
         sys.exit(3)
 
     print()
-    print("Done! Please fully quit and restart Claude Desktop.")
+    if "claude-desktop" in targets:
+        print("Done! Claude Desktop을 완전히 종료(트레이→Quit) 후 다시 실행하세요.")
+    if "claude-code" in targets:
+        print("Done! Claude Code 세션에서 자동 적용 — 새 세션부터 dartlens 도구 사용 가능.")
 
 
 if __name__ == "__main__":

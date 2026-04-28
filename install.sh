@@ -73,8 +73,14 @@ case ":$PATH:" in
     *) [ -d "$LOCAL_BIN" ] && PATH="$LOCAL_BIN:$PATH" && export PATH ;;
 esac
 
-# ── [3/3] DART API key + Claude Desktop config ───────────
-printf '%b[3/3] Configuring Claude Desktop (DART API key required)...%b\n' "$CYAN" "$NC"
+# ── [3/3] MCP target config + DART API key ───────────────
+# DARTLENS_TARGET 으로 등록 대상 지정 가능: claude-desktop / claude-code / both / auto
+# 기본 auto: `claude` CLI 가 PATH 에 있으면 Claude Code, Desktop config 디렉토리 있으면 Desktop,
+# 둘 다면 both, 아무것도 못 찾으면 claude-desktop.
+DARTLENS_TARGET="${DARTLENS_TARGET:-auto}"
+export DARTLENS_TARGET
+
+printf '%b[3/3] Configuring MCP (target=%s, DART API key required)...%b\n' "$CYAN" "$DARTLENS_TARGET" "$NC"
 printf '      DART API 키가 없다면 https://opendart.fss.or.kr 에서 무료 발급 (분당 1,000건 / 일 20,000건)\n\n'
 
 # arrays 대신 함수 + "$@" 으로 우회 (POSIX 호환).
