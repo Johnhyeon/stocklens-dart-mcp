@@ -82,13 +82,45 @@ def validate_key(api_key: str) -> tuple[bool, str]:
 # Claude Desktop config 위치 / entry 결정
 # ---------------------------------------------------------------------------
 
+def _uv_tool_bin_dirs() -> list[Path]:
+    """`uv tool install`이 entry point를 배치하는 경로 후보.
+
+    uv는 `~/.local/bin` (Unix·Windows 공통)을 표준으로 쓰지만, 사용자가
+    `UV_TOOL_BIN_DIR` / `XDG_BIN_HOME`로 재정의할 수 있다. 두 경우 다 커버.
+    """
+    candidates: list[Path] = []
+    env = os.environ.get("UV_TOOL_BIN_DIR")
+    if env:
+        candidates.append(Path(env))
+    xdg = os.environ.get("XDG_BIN_HOME")
+    if xdg:
+        candidates.append(Path(xdg))
+    candidates.append(Path.home() / ".local" / "bin")
+    return [p for p in candidates if p.exists()]
+
+
 def resolve_server_entry(preferred_command: str = "dartlens") -> dict:
+    """PATH 의존 없이 확실히 실행되는 MCP server config entry를 생성.
+
+    우선순위:
+    1. 절대 경로가 명시되면 그대로 사용
+    2. PATH 탐색 (shutil.which)
+    3. uv tool bin 디렉토리 직접 탐색 (`~/.local/bin` 등) — install 직후 PATH 미반영 케이스
+    4. sysconfig scripts 디렉토리 직접 탐색 (pip 호환)
+    5. 최후 fallback: `python -m dartlens`
+    """
     if os.path.isabs(preferred_command) and Path(preferred_command).exists():
         return {"command": preferred_command}
 
     found = shutil.which(preferred_command)
     if found:
         return {"command": found}
+
+    for bin_dir in _uv_tool_bin_dirs():
+        for candidate_name in (f"{preferred_command}.exe", preferred_command):
+            candidate = bin_dir / candidate_name
+            if candidate.exists():
+                return {"command": str(candidate)}
 
     try:
         scripts_dir = Path(sysconfig.get_paths()["scripts"])

@@ -100,6 +100,23 @@ if [ $? -ne 0 ]; then
 fi
 echo ""
 
+# ── Verify ───────────────────────────────────────────────
+echo -e "${CYAN}Verifying installation...${NC}"
+if [ -x "$LOCAL_BIN/dartlens-doctor" ]; then
+    if ! "$LOCAL_BIN/dartlens-doctor"; then
+        echo ""
+        echo -e "${RED}[FAIL] Doctor reported critical issues. See above for fix commands.${NC}"
+        exit 1
+    fi
+else
+    if ! uv tool run --from dartlens-mcp dartlens-doctor; then
+        echo ""
+        echo -e "${RED}[FAIL] Doctor reported critical issues.${NC}"
+        exit 1
+    fi
+fi
+echo ""
+
 echo "=============================================="
 echo -e "${GREEN}  Installation complete${NC}"
 echo "=============================================="
@@ -114,4 +131,5 @@ echo "  3. Try: '삼성전자 최근 공시 보여줘'"
 echo ""
 echo "Update later:    uv tool upgrade dartlens-mcp"
 echo "Re-register key: dartlens-setup <KEY>"
+echo "Diagnose:        dartlens-doctor"
 echo ""

@@ -89,6 +89,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host ""
 
+# ── Verify ───────────────────────────────────────────────
+Info "Verifying installation..."
+$doctorExe = Join-Path $LocalBin "dartlens-doctor.exe"
+if (Test-Path $doctorExe) {
+    & $doctorExe
+} else {
+    & uv tool run --from dartlens-mcp dartlens-doctor
+}
+if ($LASTEXITCODE -ne 0) {
+    Err ""
+    Err "[FAIL] Doctor reported critical issues. See above for fix commands."
+    exit 1
+}
+Write-Host ""
+
 Write-Host "=============================================="
 OK     "  Installation complete"
 Write-Host "=============================================="
@@ -100,4 +115,5 @@ Write-Host "  3. Try: '삼성전자 최근 공시 보여줘'"
 Write-Host ""
 Write-Host "Update later:    uv tool upgrade dartlens-mcp"
 Write-Host "Re-register key: dartlens-setup <KEY>"
+Write-Host "Diagnose:        dartlens-doctor"
 Write-Host ""

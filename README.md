@@ -33,6 +33,7 @@ AI에게 공시 PDF를 보여주면 **숫자를 추측해서 틀린 답**을 합
 - 🔐 **API 키는 OS 키체인** (Windows DPAPI / macOS Keychain / Linux Secret Service) — config 평문 저장 X
 - 💸 **무료 DART OpenAPI** — 분당 1,000건 / 일 20,000건
 - 🧠 **토큰 다이어트** — 단위 압축 + 보고서 인덱스 + 키워드 매치 (`find=...`)로 긴 사업보고서도 가벼움
+- 🩺 **`dartlens-doctor`** — 막혔을 때 원인·해결 명령까지 자동 진단
 
 ## 빠른 시작 (Python 사전 설치 불필요)
 
@@ -94,6 +95,14 @@ Claude에서:
 ```
 
 기업명, 공시 목록, 보고일자가 나오면 설치 완료입니다.
+
+## 설치 문제 진단
+
+```bash
+dartlens-doctor
+```
+
+uv·패키지·명령·config·API 키 5단계 자동 점검. 문제 원인과 고치는 명령어까지 표시. 친구분이 막혔을 때 이 한 줄만 보내주세요.
 
 ---
 
