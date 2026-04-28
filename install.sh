@@ -1,5 +1,5 @@
-#!/bin/bash
-# dartlens Installer (macOS / Linux)
+#!/bin/sh
+# dartlens Installer (macOS / Linux) — POSIX sh
 # Usage:
 #   curl -LsSf https://raw.githubusercontent.com/Johnhyeon/dartlens-mcp/main/install.sh | sh
 #
@@ -10,6 +10,9 @@
 #   1) uv (Python package manager) — auto-installs Python runtime if missing
 #   2) dartlens-mcp via `uv tool install`
 #   3) Claude Desktop config + DART API key validation via `dartlens-setup`
+#
+# 본 스크립트는 Debian/Ubuntu/RaspberryPiOS 의 dash 등 POSIX sh 에서도
+# 그대로 동작하도록 작성되어 있다 (echo -e / arrays / [[ ]] 사용 안 함).
 
 set -e
 
@@ -19,117 +22,112 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    OS="macOS"
-elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    OS="Linux"
-else
-    OS="Unknown"
-fi
+case "$(uname -s)" in
+    Darwin) OS="macOS" ;;
+    Linux)  OS="Linux" ;;
+    *)      OS="Unknown" ;;
+esac
 
-echo ""
-echo "=============================================="
-echo "  dartlens Installer ($OS)"
-echo "=============================================="
-echo ""
+printf '\n'
+printf '==============================================\n'
+printf '  dartlens Installer (%s)\n' "$OS"
+printf '==============================================\n\n'
 
 LOCAL_BIN="$HOME/.local/bin"
 
 # ── [1/3] uv ─────────────────────────────────────────────
-echo -e "${CYAN}[1/3] Checking uv...${NC}"
+printf '%b[1/3] Checking uv...%b\n' "$CYAN" "$NC"
 if ! command -v uv > /dev/null 2>&1; then
-    echo "      uv not found. Installing from astral.sh..."
+    printf '      uv not found. Installing from astral.sh...\n'
     if ! curl -LsSf https://astral.sh/uv/install.sh | sh; then
-        echo -e "      ${RED}[FAIL] uv installation failed.${NC}"
-        echo "      Manual install: https://docs.astral.sh/uv/getting-started/installation/"
+        printf '      %b[FAIL] uv installation failed.%b\n' "$RED" "$NC"
+        printf '      Manual install: https://docs.astral.sh/uv/getting-started/installation/\n'
         exit 1
     fi
     if [ -d "$LOCAL_BIN" ]; then
-        export PATH="$LOCAL_BIN:$PATH"
+        PATH="$LOCAL_BIN:$PATH"
+        export PATH
     fi
     if ! command -v uv > /dev/null 2>&1; then
-        echo -e "      ${RED}[FAIL] uv installed but not on PATH. Open a new terminal and re-run.${NC}"
+        printf '      %b[FAIL] uv installed but not on PATH. Open a new terminal and re-run.%b\n' "$RED" "$NC"
         exit 1
     fi
-    echo -e "      ${GREEN}uv installed: $(command -v uv)${NC}"
+    printf '      %buv installed: %s%b\n' "$GREEN" "$(command -v uv)" "$NC"
 else
-    echo -e "      ${GREEN}uv found: $(command -v uv)${NC}"
+    printf '      %buv found: %s%b\n' "$GREEN" "$(command -v uv)" "$NC"
 fi
-echo ""
+printf '\n'
 
 # ── [2/3] dartlens-mcp ─────────────────────────────
-echo -e "${CYAN}[2/3] Installing dartlens-mcp...${NC}"
+printf '%b[2/3] Installing dartlens-mcp...%b\n' "$CYAN" "$NC"
 
 if ! uv tool install --force dartlens-mcp; then
-    echo -e "      ${RED}[FAIL] uv tool install failed.${NC}"
+    printf '      %b[FAIL] uv tool install failed.%b\n' "$RED" "$NC"
     exit 1
 fi
-echo -e "      ${GREEN}dartlens-mcp installed via uv tool${NC}"
-echo ""
+printf '      %bdartlens-mcp installed via uv tool%b\n' "$GREEN" "$NC"
+printf '\n'
 
 case ":$PATH:" in
     *":$LOCAL_BIN:"*) ;;
-    *) [ -d "$LOCAL_BIN" ] && export PATH="$LOCAL_BIN:$PATH" ;;
+    *) [ -d "$LOCAL_BIN" ] && PATH="$LOCAL_BIN:$PATH" && export PATH ;;
 esac
 
 # ── [3/3] DART API key + Claude Desktop config ───────────
-echo -e "${CYAN}[3/3] Configuring Claude Desktop (DART API key required)...${NC}"
-echo "      DART API 키가 없다면 https://opendart.fss.or.kr 에서 무료 발급 (분당 1,000건 / 일 20,000건)"
-echo ""
+printf '%b[3/3] Configuring Claude Desktop (DART API key required)...%b\n' "$CYAN" "$NC"
+printf '      DART API 키가 없다면 https://opendart.fss.or.kr 에서 무료 발급 (분당 1,000건 / 일 20,000건)\n\n'
 
-# curl | sh 로 실행되면 stdin이 파이프라 input() 이 막힌다.
-# /dev/tty 가 있으면 거기에 연결해서 키 입력을 받게 한다.
-# DART_API_KEY env var 가 이미 있으면 setup 이 prompt 없이 진행함.
-if [ -x "$LOCAL_BIN/dartlens-setup" ]; then
-    SETUP_CMD=("$LOCAL_BIN/dartlens-setup")
-else
-    SETUP_CMD=(uv tool run --from dartlens-mcp dartlens-setup)
-fi
+# arrays 대신 함수 + "$@" 으로 우회 (POSIX 호환).
+# curl | sh 일 때 stdin은 파이프라 input() 이 막힌다. /dev/tty 가 있으면
+# 거기에 연결해서 키 입력을 받게 한다. DART_API_KEY env 가 있으면 prompt 없이 진행.
+run_setup() {
+    if [ -x "$LOCAL_BIN/dartlens-setup" ]; then
+        "$LOCAL_BIN/dartlens-setup" "$@"
+    else
+        uv tool run --from dartlens-mcp dartlens-setup "$@"
+    fi
+}
 
 if [ -n "$DART_API_KEY" ] || [ ! -e /dev/tty ]; then
-    "${SETUP_CMD[@]}"
+    run_setup
 else
-    "${SETUP_CMD[@]}" < /dev/tty
+    run_setup < /dev/tty
 fi
 
 if [ $? -ne 0 ]; then
-    echo ""
-    echo -e "${RED}[FAIL] dartlens-setup failed. 키를 직접 다시 등록하려면:${NC}"
-    echo -e "${RED}       dartlens-setup <YOUR_DART_API_KEY>${NC}"
+    printf '\n'
+    printf '%b[FAIL] dartlens-setup failed. 키를 직접 다시 등록하려면:%b\n' "$RED" "$NC"
+    printf '%b       dartlens-setup <YOUR_DART_API_KEY>%b\n' "$RED" "$NC"
     exit 1
 fi
-echo ""
+printf '\n'
 
 # ── Verify ───────────────────────────────────────────────
-echo -e "${CYAN}Verifying installation...${NC}"
-if [ -x "$LOCAL_BIN/dartlens-doctor" ]; then
-    if ! "$LOCAL_BIN/dartlens-doctor"; then
-        echo ""
-        echo -e "${RED}[FAIL] Doctor reported critical issues. See above for fix commands.${NC}"
-        exit 1
+printf '%bVerifying installation...%b\n' "$CYAN" "$NC"
+run_doctor() {
+    if [ -x "$LOCAL_BIN/dartlens-doctor" ]; then
+        "$LOCAL_BIN/dartlens-doctor"
+    else
+        uv tool run --from dartlens-mcp dartlens-doctor
     fi
-else
-    if ! uv tool run --from dartlens-mcp dartlens-doctor; then
-        echo ""
-        echo -e "${RED}[FAIL] Doctor reported critical issues.${NC}"
-        exit 1
-    fi
+}
+if ! run_doctor; then
+    printf '\n'
+    printf '%b[FAIL] Doctor reported critical issues. See above for fix commands.%b\n' "$RED" "$NC"
+    exit 1
 fi
-echo ""
+printf '\n'
 
-echo "=============================================="
-echo -e "${GREEN}  Installation complete${NC}"
-echo "=============================================="
-echo ""
-echo "Next steps:"
-echo "  1. Fully quit Claude Desktop"
-if [[ "$OS" == "macOS" ]]; then
-    echo "     (Cmd+Q or menu bar -> Claude -> Quit)"
+printf '==============================================\n'
+printf '%b  Installation complete%b\n' "$GREEN" "$NC"
+printf '==============================================\n\n'
+printf 'Next steps:\n'
+printf '  1. Fully quit Claude Desktop\n'
+if [ "$OS" = "macOS" ]; then
+    printf '     (Cmd+Q or menu bar -> Claude -> Quit)\n'
 fi
-echo "  2. Restart Claude Desktop"
-echo "  3. Try: '삼성전자 최근 공시 보여줘'"
-echo ""
-echo "Update later:    uv tool upgrade dartlens-mcp"
-echo "Re-register key: dartlens-setup <KEY>"
-echo "Diagnose:        dartlens-doctor"
-echo ""
+printf '  2. Restart Claude Desktop\n'
+printf '  3. Try: "삼성전자 최근 공시 보여줘"\n\n'
+printf 'Update later:    uv tool upgrade dartlens-mcp\n'
+printf 'Re-register key: dartlens-setup <KEY>\n'
+printf 'Diagnose:        dartlens-doctor\n\n'
