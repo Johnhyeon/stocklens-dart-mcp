@@ -1,0 +1,88 @@
+name: Release
+
+# 태그 푸시(v*) 시 자동:
+# 1. Python 빌드 (wheel + sdist)
+# 2. PyPI 업로드
+# 3. GitHub Release 생성 + dist 자산 첨부
+
+on:
+  push:
+    tags:
+      - 'v*'  # v0.3.0, v0.3.1 등
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # GitHub Release 생성용
+      id-token: write  # PyPI Trusted Publishing (OIDC) 용
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          PKG_VER=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VER" != "$PKG_VER" ]; then
+            echo "::error::Tag version ($TAG_VER) does not match pyproject.toml version ($PKG_VER)"
+            exit 1
+          fi
+          echo "Version OK: $PKG_VER"
+
+      - name: Build distribution
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Verify distribution
+        run: |
+          python -m pip install --upgrade twine
+          twine check dist/*
+
+      # Option A: Trusted Publishing (OIDC) — 토큰 불필요, PyPI 설정 필요
+      # https://docs.pypi.org/trusted-publishers/
+      # - name: Publish to PyPI (Trusted Publishing)
+      #   uses: pypa/gh-action-pypi-publish@release/v1
+
+      # Option B: API 토큰 (현재 활성) — 간단, 토큰 관리 필요
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
+          body: |
+            > 📬 자매 프로젝트 [stocklens-mcp](https://github.com/Johnhyeon/stocklens-mcp)와 함께 쓰면 시세·수급(stocklens) + 공시·재무(dartlens)가 모두 Claude에 연결됩니다.
+
+            ---
+
+            ## 📥 설치 / 업그레이드 (한 줄)
+
+            **신규 설치 (Windows · PowerShell)**
+            ```powershell
+            powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Johnhyeon/dartlens-mcp/main/install.ps1 | iex"
+            ```
+
+            **신규 설치 (macOS / Linux)**
+            ```bash
+            curl -LsSf https://raw.githubusercontent.com/Johnhyeon/dartlens-mcp/main/install.sh | sh
+            ```
+
+            **업데이트**: `uv tool upgrade dartlens-mcp`
+
+            > DART OpenAPI 키가 필요합니다 — [무료 발급](https://opendart.fss.or.kr) (분당 1,000건 / 일 20,000건).
+
+            ## 📚 링크
+            - [도구 목록 / 권장 워크플로우](https://github.com/Johnhyeon/dartlens-mcp/blob/main/README.md#도구)
+            - [자매 프로젝트 stocklens-mcp](https://github.com/Johnhyeon/stocklens-mcp)
