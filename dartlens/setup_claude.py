@@ -245,13 +245,8 @@ def _store_api_key(api_key: str, *, plaintext: bool, env_for_entry: dict) -> dic
         backend = keyring_helper.save(api_key)
         print(f"  [OK] Stored in OS keychain ({backend})")
     except keyring_helper.KeyringUnavailableError as e:
+        # 메시지 자체에 이미 --plaintext 안내가 포함되어 있음 (중복 블록 제거)
         print(f"  [ERROR] {e}", file=sys.stderr)
-        print(
-            "  키체인을 쓸 수 없는 환경입니다. 평문 모드로 강제 저장하려면\n"
-            "    dartlens-setup --plaintext <KEY>\n"
-            "  를 사용하세요. (단, JSON 파일이 유출되면 키도 함께 노출됩니다.)",
-            file=sys.stderr,
-        )
         raise SystemExit(2)
     return env or None
 
@@ -465,6 +460,46 @@ def _obtain_validated_key(initial_key: str, *, key_was_provided: bool) -> str:
     sys.exit(2)
 
 
+def _decide_plaintext_mode(explicit_flag: bool) -> bool:
+    """헤드리스 Linux 면 키체인이 어차피 안 되므로 평문 모드를 자동 적용.
+
+    우선순위:
+    1. 사용자가 `--plaintext` 명시 → True
+    2. `DARTLENS_NO_PLAINTEXT=1` 명시 → False (키체인 강제 시도, 실패해도 fallback 안 함)
+    3. 헤드리스 Linux + SecretService 백엔드 감지 → True (안내 출력 후 자동 적용)
+    4. 그 외 → False (정상 키체인 사용)
+    """
+    if explicit_flag:
+        return True
+    if os.environ.get("DARTLENS_NO_PLAINTEXT"):
+        return False
+    if not keyring_helper._is_headless_linux():
+        return False
+
+    # 헤드리스 Linux 라도 SecretService 백엔드일 때만 자동 평문 (다른 백엔드는 동작할 수도)
+    try:
+        import keyring as _kr
+        backend_name = type(_kr.get_keyring()).__name__
+    except Exception:
+        backend_name = ""
+
+    if "SecretService" not in backend_name:
+        return False
+
+    print()
+    print("  [INFO] 헤드리스 Linux 환경 감지 (DISPLAY/WAYLAND 미설정)")
+    print("         OS 키체인을 GUI 없이 잠금 해제할 수 없어 평문 모드로 진행합니다.")
+    print("         키는 config JSON 의 env 항목에 저장되므로 파일 권한을 닫아주세요:")
+    for path in (
+        Path.home() / ".claude.json",
+        Path.home() / ".config" / "Claude" / "claude_desktop_config.json",
+    ):
+        if path.exists() or path.parent.exists():
+            print(f"             chmod 600 {path}")
+    print("         키체인을 강제로 시도하려면: DARTLENS_NO_PLAINTEXT=1 dartlens-setup")
+    return True
+
+
 def main() -> None:
     print("==============================================")
     print("  dartlens — MCP Setup")
@@ -475,6 +510,8 @@ def main() -> None:
     target_labels = ", ".join(TARGETS[t][1] for t in targets)
     print(f"  Targets: {target_labels}")
 
+    plaintext = _decide_plaintext_mode(args.plaintext)
+
     initial_key = (args.api_key or os.environ.get("DART_API_KEY", "")).strip()
     key_was_provided = bool(initial_key)
 
@@ -484,7 +521,7 @@ def main() -> None:
         configure(
             api_key,
             command=args.command,
-            plaintext=args.plaintext,
+            plaintext=plaintext,
             targets=targets,
         )
     except SystemExit:
