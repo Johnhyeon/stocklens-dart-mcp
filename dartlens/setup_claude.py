@@ -461,34 +461,34 @@ def _obtain_validated_key(initial_key: str, *, key_was_provided: bool) -> str:
 
 
 def _decide_plaintext_mode(explicit_flag: bool) -> bool:
-    """헤드리스 Linux 면 키체인이 어차피 안 되므로 평문 모드를 자동 적용.
+    """키체인 응답성을 실제 측정해서 평문 모드 적용 여부 결정.
 
     우선순위:
     1. 사용자가 `--plaintext` 명시 → True
     2. `DARTLENS_NO_PLAINTEXT=1` 명시 → False (키체인 강제 시도, 실패해도 fallback 안 함)
-    3. 헤드리스 Linux + SecretService 백엔드 감지 → True (안내 출력 후 자동 적용)
-    4. 그 외 → False (정상 키체인 사용)
+    3. Windows/macOS → False (DPAPI/Keychain 신뢰)
+    4. Linux: keyring.get_password 를 짧은 timeout 으로 찔러봐서:
+       - 응답 있음 → False (키체인 정상)
+       - 응답 없음/예외 → True (안내 출력 후 자동 평문)
+
+    DISPLAY env 휴리스틱은 RasPi OS Desktop 같은 케이스(DISPLAY 는 있지만 실제
+    SecretService 는 잠금)를 못 잡아내므로 실제 응답성 측정으로 대체.
     """
     if explicit_flag:
         return True
     if os.environ.get("DARTLENS_NO_PLAINTEXT"):
         return False
-    if not keyring_helper._is_headless_linux():
-        return False
-
-    # 헤드리스 Linux 라도 SecretService 백엔드일 때만 자동 평문 (다른 백엔드는 동작할 수도)
-    try:
-        import keyring as _kr
-        backend_name = type(_kr.get_keyring()).__name__
-    except Exception:
-        backend_name = ""
-
-    if "SecretService" not in backend_name:
+    if sys.platform != "linux":
         return False
 
     print()
-    print("  [INFO] 헤드리스 Linux 환경 감지 (DISPLAY/WAYLAND 미설정)")
-    print("         OS 키체인을 GUI 없이 잠금 해제할 수 없어 평문 모드로 진행합니다.")
+    print("  Probing OS keychain (Linux Secret Service)...")
+    if keyring_helper.is_responsive():
+        print("  [OK] Keychain responsive — using OS keychain mode")
+        return False
+
+    print("  [INFO] OS 키체인이 응답하지 않아 평문 모드로 자동 전환합니다.")
+    print("         (헤드리스 SSH/RaspberryPi 등 GUI 세션 없는 Linux 에서는 정상)")
     print("         키는 config JSON 의 env 항목에 저장되므로 파일 권한을 닫아주세요:")
     for path in (
         Path.home() / ".claude.json",

@@ -101,21 +101,11 @@ def _get_backend():
 def save(api_key: str) -> str:
     """키체인에 키 저장. 사용된 backend 이름 반환.
 
-    헤드리스 Linux 가드:
-    - DISPLAY/WAYLAND 없으면 SecretService 가 잠겼을 가능성이 매우 큼 → 빠른 실패
-    - SIGALRM 타임아웃으로 D-Bus 프롬프트 무한 대기 차단
+    SIGALRM 타임아웃으로 D-Bus 프롬프트 무한 대기 차단.
+    예외는 모두 KeyringUnavailableError 로 변환 — 호출자가 평문 모드 fallback 결정.
     """
     keyring_mod = _get_backend()
-    backend = keyring_mod.get_keyring()
-    backend_name = type(backend).__name__
-
-    if _is_headless_linux() and "SecretService" in backend_name:
-        raise KeyringUnavailableError(
-            "Linux 헤드리스 세션 (DISPLAY 미설정) — Secret Service 키체인은 GUI 세션이 있어야 잠금 해제됩니다.\n"
-            "  텔레그램 봇·서버·SSH 등 헤드리스 환경에서는 평문 모드를 쓰세요:\n"
-            "    dartlens-setup --plaintext <KEY>\n"
-            "  (DPAPI/Keychain 같은 자동 암호화 없음 → JSON 파일 권한을 600 등으로 닫는 것 권장)"
-        )
+    backend_name_str = type(keyring_mod.get_keyring()).__name__
 
     try:
         with _PosixTimeout(_KEYRING_OP_TIMEOUT_SEC):
@@ -134,7 +124,7 @@ def save(api_key: str) -> str:
             "    dartlens-setup --plaintext <KEY>"
         ) from e
 
-    return backend_name
+    return backend_name_str
 
 
 def load() -> str | None:
@@ -146,10 +136,6 @@ def load() -> str | None:
     try:
         keyring_mod = _get_backend()
     except KeyringUnavailableError:
-        return None
-
-    if _is_headless_linux() and "SecretService" in type(keyring_mod.get_keyring()).__name__:
-        # 헤드리스 Linux + SecretService = 잠금 해제 불가능 → 시도 안 함
         return None
 
     for service in (SERVICE_NAME, *_LEGACY_SERVICE_NAMES):
@@ -171,9 +157,6 @@ def delete() -> bool:
     except KeyringUnavailableError:
         return False
 
-    if _is_headless_linux() and "SecretService" in type(keyring_mod.get_keyring()).__name__:
-        return False
-
     deleted_any = False
     for service in (SERVICE_NAME, *_LEGACY_SERVICE_NAMES):
         try:
@@ -192,3 +175,34 @@ def backend_name() -> str:
         return type(keyring.get_keyring()).__name__
     except Exception:
         return "unavailable"
+
+
+def is_responsive(timeout_sec: int = 2) -> bool:
+    """짧은 타임아웃으로 keyring 의 실제 응답성을 검증.
+
+    DISPLAY/WAYLAND env 만 보는 휴리스틱은 RasPi OS Desktop 처럼 DISPLAY 가
+    설정돼있지만 실제 SecretService 는 잠겨있는 케이스를 못 잡아낸다.
+    이 함수는 실제 backend 호출을 시도해서 판정한다.
+
+    True 면 keyring 사용 가능.
+    False 면 backend 부재/응답 없음/잠김 등 어떤 이유로든 사용 불가.
+    """
+    try:
+        keyring_mod = _get_backend()
+    except KeyringUnavailableError:
+        return False
+
+    # 한 번이라도 set_password 가 hang 한 적 있는 backend 면 헤드리스 가능성 매우 큼.
+    # get_password 는 일반적으로 set_password 보다 빠르게 실패하지만, SecretService 의
+    # 경우 동일한 collection 잠금 흐름을 타므로 같은 hang 위험. 그래서 timeout 사용.
+    try:
+        with _PosixTimeout(timeout_sec):
+            keyring_mod.get_password(SERVICE_NAME, USERNAME)
+        return True
+    except TimeoutError:
+        return False
+    except Exception:
+        # ItemNotFoundException 등은 "응답은 있다" 의 의미일 수 있지만 대부분
+        # 환경에서 keyring 이 정상 동작하면 None 을 그냥 반환한다. 예외가 났다면
+        # 안전하게 사용 불가로 판단.
+        return False
