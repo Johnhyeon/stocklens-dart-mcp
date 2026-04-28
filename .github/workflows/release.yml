@@ -44,16 +44,13 @@ jobs:
           python -m pip install --upgrade twine
           twine check dist/*
 
-      # Option A: Trusted Publishing (OIDC) — 토큰 불필요, PyPI 설정 필요
+      # Trusted Publishing (OIDC) — PyPI에 등록된 publisher가 자동 인증
       # https://docs.pypi.org/trusted-publishers/
-      # - name: Publish to PyPI (Trusted Publishing)
-      #   uses: pypa/gh-action-pypi-publish@release/v1
-
-      # Option B: API 토큰 (현재 활성) — 간단, 토큰 관리 필요
-      - name: Publish to PyPI
+      # 설정: PyPI > Account > Publishing > Add pending publisher
+      #   Project: dartlens-mcp / Owner: Johnhyeon / Repo: dartlens-mcp
+      #   Workflow: release.yml / Environment: (비워둠)
+      - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
