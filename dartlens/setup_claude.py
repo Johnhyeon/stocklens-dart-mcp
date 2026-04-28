@@ -42,12 +42,24 @@ _VALIDATE_CORP_CODE = "00126380"
 # ---------------------------------------------------------------------------
 
 def _prompt_for_key() -> str:
+    """DART API 키 입력 — getpass 로 화면 echo 차단 (어깨너머 노출 방지).
+
+    터미널에 따라 getpass 가 fallback 이 안 될 수 있으므로 (e.g. dumb terminal)
+    실패 시 일반 input 으로 떨어진다 — 그때만 평문 echo.
+    """
+    import getpass
+
     print()
-    print("DART OpenAPI 키를 입력하세요.")
+    print("DART OpenAPI 키를 입력하세요. (입력값은 화면에 표시되지 않음)")
     print("(키가 없다면 https://opendart.fss.or.kr 에서 무료 발급)")
     print()
     try:
-        key = input("DART_API_KEY: ").strip()
+        try:
+            key = getpass.getpass("DART_API_KEY: ").strip()
+        except (getpass.GetPassWarning, OSError):
+            # tty 가 아니거나 echo 끄기 실패 → 평문 fallback (경고 표시)
+            print("  [WARN] echo 끄기 실패 — 입력값이 화면에 보일 수 있습니다.")
+            key = input("DART_API_KEY: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         raise SystemExit("입력이 취소되었습니다.")
@@ -405,6 +417,54 @@ def _resolve_targets(arg: str) -> list[str]:
     raise ValueError(f"Invalid target: {arg}")
 
 
+_MAX_KEY_ATTEMPTS = 3
+
+
+def _obtain_validated_key(initial_key: str, *, key_was_provided: bool) -> str:
+    """키 입력 → DART 검증 루프. 실패 시 재시도 (최대 _MAX_KEY_ATTEMPTS).
+
+    key_was_provided: True 면 사용자가 args/env 로 키를 명시한 경우.
+        그땐 첫 시도만 하고 실패하면 즉시 종료 (자동화 흐름 방해 안 함).
+    """
+    api_key = initial_key
+    for attempt in range(1, _MAX_KEY_ATTEMPTS + 1):
+        if not api_key:
+            try:
+                api_key = _prompt_for_key()
+            except SystemExit:
+                raise
+        if not api_key:
+            print("  [ERROR] DART API 키가 입력되지 않았습니다.", file=sys.stderr)
+            sys.exit(1)
+
+        print()
+        print(f"  Validating API key against DART... (attempt {attempt}/{_MAX_KEY_ATTEMPTS})")
+        ok, msg = validate_key(api_key)
+        if ok:
+            print(f"  [OK] {msg}")
+            return api_key
+
+        print(f"  [ERROR] 키 검증 실패: {msg}", file=sys.stderr)
+        print(
+            "  키가 올바른지, DART(https://opendart.fss.or.kr)에서 발급받은 키인지 확인하세요.",
+            file=sys.stderr,
+        )
+
+        # 사용자가 args/env 로 키를 줬으면 자동화 흐름이라 prompt 띄우지 않음
+        if key_was_provided and attempt == 1:
+            sys.exit(2)
+
+        if attempt >= _MAX_KEY_ATTEMPTS:
+            print(f"  [ERROR] {_MAX_KEY_ATTEMPTS}회 모두 실패. 종료합니다.", file=sys.stderr)
+            sys.exit(2)
+
+        # 다음 attempt 는 다시 prompt 받기
+        api_key = ""
+        key_was_provided = False  # 첫 attempt 후에는 항상 대화형으로 재시도
+
+    sys.exit(2)
+
+
 def main() -> None:
     print("==============================================")
     print("  dartlens — MCP Setup")
@@ -415,24 +475,10 @@ def main() -> None:
     target_labels = ", ".join(TARGETS[t][1] for t in targets)
     print(f"  Targets: {target_labels}")
 
-    api_key = (args.api_key or os.environ.get("DART_API_KEY", "")).strip()
-    if not api_key:
-        api_key = _prompt_for_key()
-    if not api_key:
-        print("  [ERROR] DART API 키가 입력되지 않았습니다.", file=sys.stderr)
-        sys.exit(1)
+    initial_key = (args.api_key or os.environ.get("DART_API_KEY", "")).strip()
+    key_was_provided = bool(initial_key)
 
-    print()
-    print("  Validating API key against DART...")
-    ok, msg = validate_key(api_key)
-    if not ok:
-        print(f"  [ERROR] 키 검증 실패: {msg}", file=sys.stderr)
-        print(
-            "  키가 올바른지, DART(https://opendart.fss.or.kr)에서 발급받은 키인지 확인하세요.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    print(f"  [OK] {msg}")
+    api_key = _obtain_validated_key(initial_key, key_was_provided=key_was_provided)
 
     try:
         configure(
